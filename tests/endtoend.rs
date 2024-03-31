@@ -8,11 +8,11 @@ fn insert_and_readback() -> Result<(), ToyKVError> {
     let k = "foo".to_string();
     let v = "the rain in spain falls mainly on the plain".to_string();
 
-    match db.set(&k.as_bytes(), &v.as_bytes()) {
+    match db.set(k.clone().into_bytes(), v.clone().into_bytes()) {
         Ok(it) => it,
         Err(err) => return Err(err),
     };
-    let got = db.get(&k.as_bytes())?;
+    let got = db.get(k.as_bytes())?;
 
     assert_eq!(
         got.unwrap(),
