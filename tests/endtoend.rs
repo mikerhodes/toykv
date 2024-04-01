@@ -3,7 +3,7 @@ use toykv::ToyKVError;
 #[test]
 fn insert_and_readback() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let mut db = toykv::new(tmp_dir.path());
+    let mut db = toykv::open(tmp_dir.path());
 
     let k = "foo".to_string();
     let v = "the rain in spain falls mainly on the plain".to_string();

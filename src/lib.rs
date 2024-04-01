@@ -11,7 +11,7 @@ pub struct ToyKV<'a> {
     memtable: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
-pub fn new(d: &Path) -> ToyKV {
+pub fn open(d: &Path) -> ToyKV {
     // TODO check path, fail if it doesn't exist.
     // TODO initialise if empty (new WAL?)
     let memtable = BTreeMap::new();
