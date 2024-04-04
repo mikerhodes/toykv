@@ -10,19 +10,26 @@ use std::{
 use crate::ToyKVError;
 
 /*
-The WAL is a simple sequence of records written to a file. The main
-interesting item is the seq, which is expected to incrase by 1 with
-each item. A u32 allows for 4,294,967,295 records. We should've
+The WAL is a simple sequence of records written to a file, written in the
+order they were inserted into toykv.
+
+The main interesting item is the seq, which is expected to incrase by 1
+with each item. A u32 allows for 4,294,967,295 records. We should've
 flushed the associated memtable to disk long before we get that
 far.
 
-0       1         5       6            8              12    16            N
-| magic | u32 seq | u8 op | u16 keylen | u32 valuelen | pad | key | value |
-  ---------------------------------------------------------   ---   -----
-                 16 bytes header                               |      |
-                                                      keylen bytes    |
-                                                                      |
-                                                           valuelen bytes
+We have a WAL header that contains the WAL specific fields of seq and
+op, then we embed a KVRecord serialisation.
+
+0       1         5       6       7            9              13            N
+| magic | u32 seq | u8 op | magic | u16 keylen | u32 valuelen | key | value |
+  -----------------------   -----------------------------------------------
+    6 byte WAL header                        KVRecord serialisation
+                            ---------------------------------   ---   -----
+                                      KV header                  |      |
+                                                        keylen bytes    |
+                                                                        |
+                                                             valuelen bytes
 
 Valid `op` values:
 
@@ -31,21 +38,11 @@ Valid `op` values:
 
 */
 
-const MAGIC: u8 = b'w';
+const WAL_MAGIC: u8 = b'w';
 const OP_SET: u8 = 1u8;
-const PAD: u32 = 0u32;
 
-#[derive(Debug)]
-struct WALRecord {
-    magic: u8,
-    seq: u32,
-    op: u8,
-    keylen: u16,
-    valuelen: u32,
-    _pad: u32,
-    key: Vec<u8>,
-    value: Vec<u8>,
-}
+// TODO this shouldn't exist when we implement seq in records
+const DEFAULT_SEQ: u32 = 1;
 
 pub(crate) struct WAL<'a> {
     d: &'a Path,
@@ -78,9 +75,13 @@ impl<'a> WAL<'a> {
         let mut bytes = BufReader::with_capacity(256 * 1024, file);
 
         loop {
-            let rec = read_wal_record(&mut bytes)?;
+            let rec = WALRecord::read_one(&mut bytes)?;
             match rec {
-                Some(wr) => memtable.insert(wr.key, wr.value),
+                Some(wr) => {
+                    assert_eq!(wr.seq, DEFAULT_SEQ, "Unexpected seq code");
+                    assert_eq!(wr.op, OP_SET, "Unexpected op code");
+                    memtable.insert(wr.key, wr.value)
+                }
                 None => break, // assume we hit the end of the WAL file
             };
         }
@@ -90,7 +91,7 @@ impl<'a> WAL<'a> {
 
     /// Appends entry to WAL
     pub(crate) fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), ToyKVError> {
-        let seq = 1u32; // TODO implement sequence numbers for records
+        let seq = DEFAULT_SEQ; // TODO implement sequence numbers for records
 
         // TODO hold the file open in the WAL struct rather than opening
         // for every write.
@@ -100,63 +101,140 @@ impl<'a> WAL<'a> {
             .append(true)
             .create(true)
             .open(wal_path)?;
-
-        // Create our record and attempt to write
-        // it out in one go.
-        let mut buf = Vec::<u8>::new();
-        buf.push(MAGIC);
-        buf.extend(seq.to_be_bytes());
-        buf.push(OP_SET);
-        buf.extend((key.len() as u16).to_be_bytes());
-        buf.extend((value.len() as u32).to_be_bytes());
-        buf.extend(PAD.to_be_bytes());
-        buf.extend(key);
-        buf.extend(value);
-        file.write_all(&buf)?;
+        WALRecord::write_one(&mut file, seq, key, value)?;
         file.sync_all()?;
 
         Ok(())
     }
 }
 
-/// Read a single WAL record from a WAL file (or other Read struct).
-fn read_wal_record<T: Read>(r: &mut T) -> Result<Option<WALRecord>, Error> {
-    let mut header = [0u8; 16];
-    let n = r.read(&mut header)?;
-    if n < 16 {
-        // Is this really only Ok if we read zero?
-        // 0 < n < 16 probably actually means a corrupt file.
-        return Ok(None);
+#[derive(Debug)]
+/// Read and write WAL records.
+struct WALRecord {
+    // magic: u8,
+    seq: u32,
+    op: u8,
+    // From embedded KVRecord
+    key: Vec<u8>,
+    value: Vec<u8>,
+}
+impl WALRecord {
+    /// Read a single WAL record from a WAL file (or other Read struct).
+    fn read_one<T: Read>(r: &mut T) -> Result<Option<WALRecord>, Error> {
+        let mut header = [0u8; 6];
+        let n = r.read(&mut header)?;
+        if n < 6 {
+            // Is this really only Ok if we read zero?
+            // 0 < n < 6 probably actually means a corrupt file.
+            return Ok(None);
+        }
+
+        // This might be clearer using byteorder and a reader
+        let magic = header[0];
+        assert_eq!(magic, WAL_MAGIC, "Unexpected magic byte");
+        let seq = u32::from_be_bytes(header[1..5].try_into().unwrap());
+        let op = header[5];
+
+        let kv = KVRecord::read_one(r)?;
+
+        match kv {
+            None => Ok(None),
+            Some(kv) => {
+                let wr = WALRecord {
+                    seq,
+                    op,
+                    key: kv.key,
+                    value: kv.value,
+                };
+
+                println!("Read WAL record: {:?}", wr);
+
+                Ok(Some(wr))
+            }
+        }
     }
 
-    // This might be clearer using byteorder and a reader
-    let magic = header[0];
-    assert_eq!(magic, MAGIC, "Unexpected magic byte");
-    let seq = u32::from_be_bytes(header[1..5].try_into().unwrap());
-    let op = header[5];
-    assert_eq!(op, OP_SET, "Unexpected op code");
-    let keylen = u16::from_be_bytes(header[6..8].try_into().unwrap());
-    let valuelen = u32::from_be_bytes(header[8..12].try_into().unwrap());
-    let _pad = u32::from_be_bytes(header[12..16].try_into().unwrap());
-    assert_eq!(_pad, PAD, "Unexpected padding of non-zero");
+    /// Write a single WAL record to a WAL file (or other Write struct).
+    fn write_one<T: Write>(w: &mut T, seq: u32, key: &[u8], value: &[u8]) -> Result<(), Error> {
+        // Create our record and attempt to write
+        // it out in one go.
+        let mut buf = Vec::<u8>::new();
+        buf.push(WAL_MAGIC);
+        buf.extend(seq.to_be_bytes());
+        buf.push(OP_SET);
+        buf.extend(KVWriteRecord { key, value }.serialize());
+        w.write_all(&buf)?;
 
-    let mut key = Vec::with_capacity(keylen as usize);
-    r.by_ref().take(keylen as u64).read_to_end(&mut key)?;
-    let mut value = Vec::with_capacity(valuelen as usize);
-    r.by_ref().take(valuelen as u64).read_to_end(&mut value)?;
+        Ok(())
+    }
+}
 
-    let wr = WALRecord {
-        magic,
-        seq,
-        op,
-        keylen,
-        valuelen,
-        _pad,
-        key,
-        value,
-    };
+// TODO KVRecord / KVWriteRecord are separate from the WAL record because
+// we should be able to reuse this serialisation in the SSTables.
 
-    println!("Read WAL record: {:?}", wr);
+const KV_MAGIC: u8 = b'k';
 
-    Ok(Some(wr))
+#[derive(Debug)]
+/// Read-optimised KVRecord. It uses Vec<u8> for data to
+/// allow the structure to own the data.
+struct KVRecord {
+    // magic: u8,
+    // keylen: u16,
+    // valuelen: u32,
+    key: Vec<u8>,
+    value: Vec<u8>,
+}
+impl KVRecord {
+    /// Attempt to read a KVRecord from a Read stream.
+    pub(crate) fn read_one<T: Read>(r: &mut T) -> Result<Option<KVRecord>, Error> {
+        let mut header = [0u8; 7];
+        let n = r.read(&mut header)?;
+        if n < 7 {
+            // Is this really only Ok if we read zero?
+            // 0 < n < 7 probably actually means a corrupt file.
+            return Ok(None);
+        }
+
+        // This might be clearer using byteorder and a reader
+        let magic = header[0];
+        assert_eq!(magic, KV_MAGIC, "Unexpected magic byte");
+        let keylen = u16::from_be_bytes(header[1..3].try_into().unwrap());
+        let valuelen = u32::from_be_bytes(header[3..7].try_into().unwrap());
+
+        let mut key = Vec::with_capacity(keylen as usize);
+        r.by_ref().take(keylen as u64).read_to_end(&mut key)?;
+        let mut value = Vec::with_capacity(valuelen as usize);
+        r.by_ref().take(valuelen as u64).read_to_end(&mut value)?;
+
+        let kv = KVRecord { key, value };
+
+        Ok(Some(kv))
+    }
+}
+
+#[derive(Debug)]
+/// Write-optimised version of KVRecord. It uses slices for
+/// data to avoid copying.
+struct KVWriteRecord<'a> {
+    // magic: u8,
+    // keylen: u16,
+    // valuelen: u32,
+    key: &'a [u8],
+    value: &'a [u8],
+}
+impl<'a> KVWriteRecord<'a> {
+    /// Serialise the KVWriteRecord to a buffer.
+    ///
+    /// We choose to produce a buffer here rather than use a write_one
+    /// approach to allow KVRecord data to be embedded into other
+    /// serialised formats more easily.
+    pub(crate) fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::<u8>::new();
+        buf.push(KV_MAGIC);
+        buf.extend((self.key.len() as u16).to_be_bytes());
+        buf.extend((self.value.len() as u32).to_be_bytes());
+        buf.extend(self.key);
+        buf.extend(self.value);
+        buf
+    }
 }
