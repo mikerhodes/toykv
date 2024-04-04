@@ -18,7 +18,6 @@ impl From<std::io::Error> for ToyKVError {
 
 pub struct ToyKV<'a> {
     /// d is the folder that the KV store owns.
-    d: &'a Path,
     memtable: BTreeMap<Vec<u8>, Vec<u8>>,
     wal: WAL<'a>,
 }
@@ -28,7 +27,7 @@ pub fn open(d: &Path) -> Result<ToyKV, ToyKVError> {
     // TODO initialise if empty (new WAL?)
     let mut wal = wal::new(d);
     let memtable = wal.replay()?;
-    Ok(ToyKV { d, memtable, wal })
+    Ok(ToyKV { memtable, wal })
 }
 
 impl<'a> ToyKV<'a> {
