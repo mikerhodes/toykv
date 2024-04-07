@@ -24,15 +24,10 @@ far.
 We have a WAL header that contains the WAL specific fields of seq and
 op, then we embed a KVRecord serialisation.
 
-0       1         5       6       7            9              13            N
-| magic | u32 seq | u8 op | magic | u16 keylen | u32 valuelen | key | value |
-  -----------------------   -----------------------------------------------
-    6 byte WAL header                        KVRecord serialisation
-                            ---------------------------------   ---   -----
-                                      KV header                  |      |
-                                                        keylen bytes    |
-                                                                        |
-                                                             valuelen bytes
+0       1         5       6
+| magic | u32 seq | u8 op | KVRecord |
+  -----------------------   --------
+    6 byte WAL header         see kvrecord.rs
 
 Valid `op` values:
 

@@ -1,9 +1,25 @@
-// TODO KVRecord / KVWriteRecord are separate from the WAL record because
+// KVRecord / KVWriteRecord are separate from the WAL record because
 // we should be able to reuse this serialisation in the SSTables.
+//
+//
+// A KVRecord consists of a header and then the key and value data
+// verbatim. The header contains a magic byte and version byte. The
+// version byte can be later used to support different versions, eg,
+// if we add a checksum. Then there is the length of the key and the
+// value, which are used to read the key and value respectively.
+//
+// 0          1            2            4              8
+// | u8 magic | u8 version | u16 keylen | u32 valuelen | key | value |
+//   -------------------------------------------------   ---   -----
+//             KV header                                  |      |
+//                                               keylen bytes    |
+//                                                               |
+//                                                    valuelen bytes
 
 use std::io::{Error, Read};
 
 const KV_MAGIC: u8 = b'k';
+const KV_VERSION: u8 = 1;
 
 #[derive(Debug)]
 /// Read-optimised KVRecord. It uses Vec<u8> for data to
@@ -18,7 +34,7 @@ pub(crate) struct KVRecord {
 impl KVRecord {
     /// Attempt to read a KVRecord from a Read stream.
     pub(crate) fn read_one<T: Read>(r: &mut T) -> Result<Option<KVRecord>, Error> {
-        let mut header = [0u8; 7];
+        let mut header = [0u8; 8];
         let n = r.read(&mut header)?;
         if n < 7 {
             // Is this really only Ok if we read zero?
@@ -27,10 +43,10 @@ impl KVRecord {
         }
 
         // This might be clearer using byteorder and a reader
-        let magic = header[0];
-        assert_eq!(magic, KV_MAGIC, "Unexpected magic byte");
-        let keylen = u16::from_be_bytes(header[1..3].try_into().unwrap());
-        let valuelen = u32::from_be_bytes(header[3..7].try_into().unwrap());
+        assert_eq!(header[0], KV_MAGIC, "Unexpected magic byte");
+        assert_eq!(header[1], KV_VERSION, "Unexpected version byte");
+        let keylen = u16::from_be_bytes(header[2..4].try_into().unwrap());
+        let valuelen = u32::from_be_bytes(header[4..8].try_into().unwrap());
 
         let mut key = Vec::with_capacity(keylen as usize);
         r.by_ref().take(keylen as u64).read_to_end(&mut key)?;
@@ -62,6 +78,7 @@ impl<'a> KVWriteRecord<'a> {
     pub(crate) fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::<u8>::new();
         buf.push(KV_MAGIC);
+        buf.push(KV_VERSION);
         buf.extend((self.key.len() as u16).to_be_bytes());
         buf.extend((self.value.len() as u32).to_be_bytes());
         buf.extend(self.key);
