@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use wal::WAL;
 
+mod kvrecord;
 mod wal;
 
 #[derive(Debug)]
