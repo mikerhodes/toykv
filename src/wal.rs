@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{BufReader, Error, ErrorKind, Read, Write},
     path::Path,
 };
@@ -107,6 +107,20 @@ impl<'a> WAL<'a> {
         WALRecord::write_one(&mut file, seq, key, value)?;
         file.sync_all()?;
 
+        Ok(())
+    }
+
+    /// Resets the WAL by deleting the old file and dropping any
+    /// in memory state. It's designed to be used when the memtable
+    /// this WAL is associated with has been flushed to disk and
+    /// we need to start the WAL again.
+    ///
+    /// After this, the WAL cannot be recovered
+    /// without filesystem level investigation.
+    #[allow(dead_code)]
+    pub(crate) fn reset(&mut self) -> Result<(), Error> {
+        let wal_path = self.d.join("db.wal");
+        fs::remove_file(wal_path)?;
         Ok(())
     }
 }
