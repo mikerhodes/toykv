@@ -12,6 +12,7 @@ mod wal;
 #[derive(Debug)]
 pub enum ToyKVError {
     GenericError,
+    DataDirMissing,
     FileError(std::io::Error),
 }
 
@@ -37,8 +38,10 @@ pub struct ToyKV<'a> {
 }
 
 pub fn open(d: &Path) -> Result<ToyKV, ToyKVError> {
-    // TODO check path, fail if it doesn't exist.
-    // TODO initialise if empty (new WAL?)
+    if !d.is_dir() {
+        return Err(ToyKVError::DataDirMissing);
+    }
+
     let mut wal = wal::new(d);
     let memtable = wal.replay()?;
     Ok(ToyKV {
