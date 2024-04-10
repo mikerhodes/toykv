@@ -133,6 +133,7 @@ mod tests_sorted_sstable_files {
 
 /// Provides methods to write already-sorted KVRecords to an on-disk file.
 pub(crate) struct SSTableFileWriter {
+    #[allow(dead_code)] // used in tests to check filepath
     p: PathBuf,
     f: File,
 }
