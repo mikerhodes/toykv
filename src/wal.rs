@@ -44,10 +44,13 @@ const DEFAULT_SEQ: u32 = 1;
 
 pub(crate) struct WAL<'a> {
     d: &'a Path,
+
+    /// Number of writes to the WAL since it created
+    pub(crate) wal_writes: u32,
 }
 
 pub(crate) fn new(d: &Path) -> WAL {
-    WAL { d }
+    WAL { d, wal_writes: 0 }
 }
 
 // TODO
@@ -78,7 +81,8 @@ impl<'a> WAL<'a> {
                 Some(wr) => {
                     assert_eq!(wr.seq, DEFAULT_SEQ, "Unexpected seq code");
                     assert_eq!(wr.op, OP_SET, "Unexpected op code");
-                    memtable.insert(wr.key, wr.value)
+                    memtable.insert(wr.key, wr.value);
+                    self.wal_writes += 1;
                 }
                 None => break, // assume we hit the end of the WAL file
             };
@@ -100,6 +104,7 @@ impl<'a> WAL<'a> {
             .create(true)
             .open(wal_path)?;
         WALRecord::write_one(&mut file, seq, key, value)?;
+        self.wal_writes += 1;
         file.sync_all()?;
 
         Ok(())
@@ -116,6 +121,7 @@ impl<'a> WAL<'a> {
     pub(crate) fn reset(&mut self) -> Result<(), Error> {
         let wal_path = self.d.join("db.wal");
         fs::remove_file(wal_path)?;
+        self.wal_writes = 0;
         Ok(())
     }
 }
