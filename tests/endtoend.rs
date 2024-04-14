@@ -63,3 +63,34 @@ fn data_survive_restart() -> Result<(), ToyKVError> {
 
     Ok(())
 }
+
+#[test]
+fn write_and_read_sstable() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    let writes = 2500i64;
+
+    let mut db = toykv::open(tmp_dir.path())?;
+    for n in 1..(writes + 1) {
+        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
+    }
+    assert_eq!(2, db.metrics.sst_flushes);
+    assert_eq!(writes as u64, db.metrics.writes);
+    assert_eq!(0, db.metrics.reads);
+    db.shutdown();
+
+    let mut db2 = toykv::open(tmp_dir.path())?;
+    for n in 1..(writes + 1) {
+        let got = db2.get(n.to_be_bytes().as_slice())?;
+        assert_eq!(
+            got.unwrap(),
+            n.to_le_bytes().as_slice(),
+            "Did not read back what we put in"
+        );
+    }
+
+    Ok(())
+}
