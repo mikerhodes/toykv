@@ -60,7 +60,7 @@ impl<'a> ToyKV<'a> {
     pub fn set(&mut self, k: Vec<u8>, v: Vec<u8>) -> Result<(), ToyKVError> {
         self.wal.write(&k, &v)?;
         self.memtable.insert(k, v);
-        if self.wal.wal_writes > WAL_WRITE_THRESHOLD {
+        if self.wal.wal_writes >= WAL_WRITE_THRESHOLD {
             let mut sst = sstable::new_writer(self.d.as_path())?;
             for entry in &self.memtable {
                 sst.write(entry.0, entry.1)?;
