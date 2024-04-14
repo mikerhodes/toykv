@@ -14,6 +14,7 @@ pub enum ToyKVError {
     GenericError,
     DataDirMissing,
     FileError(std::io::Error),
+    BadWALState,
 }
 
 impl From<std::io::Error> for ToyKVError {
@@ -29,11 +30,11 @@ pub struct ToyKVMetrics {
     pub writes: u64,
 }
 
-pub struct ToyKV<'a> {
+pub struct ToyKV {
     /// d is the folder that the KV store owns.
     d: PathBuf,
     memtable: BTreeMap<Vec<u8>, Vec<u8>>,
-    wal: WAL<'a>,
+    wal: WAL,
     pub metrics: ToyKVMetrics,
 }
 
@@ -55,7 +56,7 @@ pub fn open(d: &Path) -> Result<ToyKV, ToyKVError> {
 /// How many writes to a WAL before we SSTable it.
 const WAL_WRITE_THRESHOLD: u32 = 1000;
 
-impl<'a> ToyKV<'a> {
+impl ToyKV {
     /// Sets key k to v.
     pub fn set(&mut self, k: Vec<u8>, v: Vec<u8>) -> Result<(), ToyKVError> {
         self.wal.write(&k, &v)?;

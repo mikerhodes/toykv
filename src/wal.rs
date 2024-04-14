@@ -2,9 +2,9 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::{BufReader, Error, ErrorKind, Read, Write},
-    path::Path,
+    fs::{self, File, OpenOptions},
+    io::{BufReader, Error, Read, Write},
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -42,15 +42,20 @@ const OP_SET: u8 = 1u8;
 // TODO this shouldn't exist when we implement seq in records
 const DEFAULT_SEQ: u32 = 1;
 
-pub(crate) struct WAL<'a> {
-    d: &'a Path,
+pub(crate) struct WAL {
+    wal_path: PathBuf,
+    f: Option<File>,
 
     /// Number of writes to the WAL since it created
     pub(crate) wal_writes: u32,
 }
 
 pub(crate) fn new(d: &Path) -> WAL {
-    WAL { d, wal_writes: 0 }
+    WAL {
+        wal_path: d.join("db.wal"),
+        f: None,
+        wal_writes: 0,
+    }
 }
 
 // TODO
@@ -59,21 +64,27 @@ pub(crate) fn new(d: &Path) -> WAL {
 // right seq for appending, and also to reload the database memtable.
 // Then, and only then, should you be able to call write().
 
-impl<'a> WAL<'a> {
+impl WAL {
     /// Replays the WAL into a memtable. Call this first.
     pub(crate) fn replay(&mut self) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, ToyKVError> {
-        let wal_path = self.d.join("db.wal");
+        if self.f.is_some() {
+            return Err(ToyKVError::BadWALState);
+        }
 
         let mut memtable = BTreeMap::new();
 
-        let file = match OpenOptions::new().read(true).open(wal_path) {
+        let file = match OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(self.wal_path.as_path())
+        {
             Ok(it) => it,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(memtable),
             Err(e) => return Err(e.into()),
         };
 
         // A somewhat large buffer as we expect these files to be quite large.
-        let mut bytes = BufReader::with_capacity(256 * 1024, file);
+        let mut bytes = BufReader::with_capacity(256 * 1024, &file);
 
         let mut cnt = 0;
         loop {
@@ -92,22 +103,21 @@ impl<'a> WAL<'a> {
 
         println!("Replayed {} records from WAL.", cnt);
 
+        self.f = Some(file);
+
         Ok(memtable)
     }
 
     /// Appends entry to WAL
     pub(crate) fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), ToyKVError> {
+        if self.f.is_none() {
+            return Err(ToyKVError::BadWALState);
+        }
+
         let seq = DEFAULT_SEQ; // TODO implement sequence numbers for records
 
-        // TODO hold the file open in the WAL struct rather than opening
-        // for every write.
-
-        let wal_path = self.d.join("db.wal");
-        let mut file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(wal_path)?;
-        WALRecord::write_one(&mut file, seq, key, value)?;
+        let file = self.f.as_mut().unwrap();
+        WALRecord::write_one(file, seq, key, value)?;
         self.wal_writes += 1;
         // file.flush()?;
         file.sync_all()?;
@@ -123,9 +133,23 @@ impl<'a> WAL<'a> {
     /// After this, the WAL cannot be recovered
     /// without filesystem level investigation.
     #[allow(dead_code)]
-    pub(crate) fn reset(&mut self) -> Result<(), Error> {
-        let wal_path = self.d.join("db.wal");
-        fs::remove_file(wal_path)?;
+    pub(crate) fn reset(&mut self) -> Result<(), ToyKVError> {
+        if self.f.is_none() {
+            return Err(ToyKVError::BadWALState);
+        }
+
+        // Drop our writer so it closes
+        self.f = None;
+
+        // Delete the current WAL file
+        fs::remove_file(self.wal_path.as_path())?;
+
+        // Reopen the WAL, in write rather than append as it is new
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(self.wal_path.as_path())?;
+        self.f = Some(file);
         self.wal_writes = 0;
         Ok(())
     }
@@ -178,6 +202,9 @@ impl WALRecord {
     }
 
     /// Write a single WAL record to a WAL file (or other Write struct).
+    ///
+    /// This doesn't take a WALRecord so we can take slices of the data to
+    /// write rather than a copy, as we don't need a copy.
     fn write_one<T: Write>(w: &mut T, seq: u32, key: &[u8], value: &[u8]) -> Result<(), Error> {
         // Create our record and attempt to write
         // it out in one go.
