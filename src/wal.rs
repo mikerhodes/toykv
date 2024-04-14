@@ -75,6 +75,7 @@ impl<'a> WAL<'a> {
         // A somewhat large buffer as we expect these files to be quite large.
         let mut bytes = BufReader::with_capacity(256 * 1024, file);
 
+        let mut cnt = 0;
         loop {
             let rec = WALRecord::read_one(&mut bytes)?;
             match rec {
@@ -83,10 +84,13 @@ impl<'a> WAL<'a> {
                     assert_eq!(wr.op, OP_SET, "Unexpected op code");
                     memtable.insert(wr.key, wr.value);
                     self.wal_writes += 1;
+                    cnt += 1;
                 }
                 None => break, // assume we hit the end of the WAL file
             };
         }
+
+        println!("Replayed {} records from WAL.", cnt);
 
         Ok(memtable)
     }
@@ -105,6 +109,7 @@ impl<'a> WAL<'a> {
             .open(wal_path)?;
         WALRecord::write_one(&mut file, seq, key, value)?;
         self.wal_writes += 1;
+        // file.flush()?;
         file.sync_all()?;
 
         Ok(())
@@ -165,7 +170,7 @@ impl WALRecord {
                     value: kv.value,
                 };
 
-                println!("Read WAL record: {:?}", wr);
+                // println!("Read WAL record: {:?}", wr);
 
                 Ok(Some(wr))
             }

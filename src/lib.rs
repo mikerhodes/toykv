@@ -24,9 +24,9 @@ impl From<std::io::Error> for ToyKVError {
 
 #[derive(Default)]
 pub struct ToyKVMetrics {
-    sst_flushes: u64,
-    reads: u64,
-    writes: u64,
+    pub sst_flushes: u64,
+    pub reads: u64,
+    pub writes: u64,
 }
 
 pub struct ToyKV<'a> {

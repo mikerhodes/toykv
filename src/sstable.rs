@@ -2,6 +2,7 @@ use std::{
     fs::{self, DirEntry, File, OpenOptions},
     io::{BufReader, Error, Write},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use crate::kvrecord::{KVRecord, KVWriteRecord};
@@ -136,6 +137,7 @@ pub(crate) struct SSTableFileWriter {
     #[allow(dead_code)] // used in tests to check filepath
     p: PathBuf,
     f: File,
+    start: Instant,
 }
 /// Start writing a new immutable file in the dir path.
 pub(crate) fn new_writer(dir: &Path) -> Result<SSTableFileWriter, Error> {
@@ -176,6 +178,7 @@ pub(crate) fn new_writer(dir: &Path) -> Result<SSTableFileWriter, Error> {
     Ok(SSTableFileWriter {
         f,
         p: path.to_path_buf(),
+        start: Instant::now(),
     })
 }
 impl SSTableFileWriter {
@@ -194,6 +197,8 @@ impl SSTableFileWriter {
     pub(crate) fn finalise(&mut self) -> Result<(), Error> {
         self.f.flush()?;
         self.f.sync_all()?;
+        let elapsed_time = self.start.elapsed();
+        println!("Writing sstable took {}ms.", elapsed_time.as_millis());
         Ok(())
     }
 }
