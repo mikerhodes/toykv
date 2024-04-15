@@ -232,17 +232,17 @@ mod tests_writer {
 
 /// Iterate entries in an on-disk SSTable.
 pub(crate) struct SSTableFileReader {
-    tables: Vec<File>,
+    tables: Vec<BufReader<File>>,
 }
 
 /// Create a new SSTableFileReader that is able to search
 /// for keys in the set of SSTables managed within a folder.
 pub(crate) fn new_reader(dir: &Path) -> Result<SSTableFileReader, Error> {
     let files = sorted_sstable_files(dir)?;
-    let mut tables: Vec<File> = vec![];
+    let mut tables: Vec<BufReader<File>> = vec![];
     for p in files {
         let f = OpenOptions::new().read(true).open(p.path())?;
-        tables.push(f);
+        tables.push(BufReader::with_capacity(256 * 1024, f));
     }
     Ok(SSTableFileReader { tables })
 }
@@ -255,11 +255,9 @@ impl SSTableFileReader {
         // on disk. Read each until we find k. If we fall off the end,
         // return None.
         for t in self.tables.as_mut_slice() {
-            // let f = OpenOptions::new().read(true).open(&t)?;
             t.seek(SeekFrom::Start(0))?;
-            let mut reader = BufReader::new(t);
             loop {
-                let kv = KVRecord::read_one(&mut reader)?;
+                let kv = KVRecord::read_one(t)?;
                 match kv {
                     None => break, // end of SSTable, go to next
                     Some(kv) => {
