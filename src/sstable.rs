@@ -1,6 +1,6 @@
 use std::{
     fs::{self, DirEntry, File, OpenOptions},
-    io::{BufReader, Error, Write},
+    io::{BufReader, Error, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -232,27 +232,32 @@ mod tests_writer {
 
 /// Iterate entries in an on-disk SSTable.
 pub(crate) struct SSTableFileReader {
-    tables: Vec<PathBuf>,
+    tables: Vec<File>,
 }
 
 /// Create a new SSTableFileReader that is able to search
 /// for keys in the set of SSTables managed within a folder.
 pub(crate) fn new_reader(dir: &Path) -> Result<SSTableFileReader, Error> {
     let files = sorted_sstable_files(dir)?;
-    let tables: Vec<PathBuf> = files.iter().map(|d| d.path()).collect();
+    let mut tables: Vec<File> = vec![];
+    for p in files {
+        let f = OpenOptions::new().read(true).open(p.path())?;
+        tables.push(f);
+    }
     Ok(SSTableFileReader { tables })
 }
 
 impl SSTableFileReader {
     /// Search through the SSTables available to this reader for
     /// a key. Return an Option with its value.
-    pub(crate) fn get(&self, k: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         // self.tables is in the right order for scanning the sstables
         // on disk. Read each until we find k. If we fall off the end,
         // return None.
-        for t in &self.tables {
-            let f = OpenOptions::new().read(true).open(&t)?;
-            let mut reader = BufReader::new(&f);
+        for t in self.tables.as_mut_slice() {
+            // let f = OpenOptions::new().read(true).open(&t)?;
+            t.seek(SeekFrom::Start(0))?;
+            let mut reader = BufReader::new(t);
             loop {
                 let kv = KVRecord::read_one(&mut reader)?;
                 match kv {
@@ -289,7 +294,7 @@ mod tests_reader {
         w.write(&[1, 2, 3], &[1, 2, 3, 4])?;
         w.finalise()?;
 
-        let r = new_reader(tmp_dir.path())?;
+        let mut r = new_reader(tmp_dir.path())?;
         assert_eq!(r.get(&[1, 2, 3])?, Some(vec![1, 2, 3, 4]));
         assert_eq!(r.get(&[14])?, None);
 
@@ -319,7 +324,7 @@ mod tests_reader {
         w.write(&[1, 2, 3], &[6, 7, 8, 9])?; // set new value in newer layer
         w.finalise()?;
 
-        let r = new_reader(tmp_dir.path())?;
+        let mut r = new_reader(tmp_dir.path())?;
         assert_eq!(r.get(&[1, 2, 3])?, Some(vec![6, 7, 8, 9]));
         assert_eq!(r.get(&[23, 24])?, Some(vec![100, 122, 4]));
         assert_eq!(r.get(&[14])?, None);

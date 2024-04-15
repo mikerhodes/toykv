@@ -80,6 +80,14 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
     assert_eq!(2, db.metrics.sst_flushes);
     assert_eq!(writes as u64, db.metrics.writes);
     assert_eq!(0, db.metrics.reads);
+    for n in 1..(writes + 1) {
+        let got = db.get(n.to_be_bytes().as_slice())?;
+        assert_eq!(
+            got.unwrap(),
+            n.to_le_bytes().as_slice(),
+            "Did not read back what we put in"
+        );
+    }
     db.shutdown();
 
     let mut db2 = toykv::open(tmp_dir.path())?;

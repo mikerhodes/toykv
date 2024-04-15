@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use sstable::SSTableFileReader;
 use wal::WAL;
 
 mod kvrecord;
@@ -35,6 +36,7 @@ pub struct ToyKV {
     d: PathBuf,
     memtable: BTreeMap<Vec<u8>, Vec<u8>>,
     wal: WAL,
+    sstables: SSTableFileReader,
     pub metrics: ToyKVMetrics,
 }
 
@@ -45,10 +47,12 @@ pub fn open(d: &Path) -> Result<ToyKV, ToyKVError> {
 
     let mut wal = wal::new(d);
     let memtable = wal.replay()?;
+    let sstables = sstable::new_reader(d)?;
     Ok(ToyKV {
         d: d.to_path_buf(),
         memtable,
         wal,
+        sstables,
         metrics: Default::default(),
     })
 }
@@ -70,6 +74,10 @@ impl ToyKV {
             self.wal.reset()?;
             self.memtable.clear();
             self.metrics.sst_flushes += 1;
+
+            // Need a new reader to regenerate the file list to
+            // read from.
+            self.sstables = sstable::new_reader(self.d.as_path())?;
         }
         self.metrics.writes += 1;
         Ok(())
@@ -80,10 +88,7 @@ impl ToyKV {
         let r = self.memtable.get(k);
         let r = match r {
             Some(r) => Some(r.clone()),
-            None => {
-                let sst = sstable::new_reader(self.d.as_path())?;
-                sst.get(k)?
-            }
+            None => self.sstables.get(k)?,
         };
         self.metrics.reads += 1;
         Ok(r)
