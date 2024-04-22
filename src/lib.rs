@@ -24,6 +24,12 @@ impl From<std::io::Error> for ToyKVError {
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub enum WALSync {
+    Full,
+    Off,
+}
+
 #[derive(Default)]
 pub struct ToyKVMetrics {
     pub sst_flushes: u64,
@@ -41,11 +47,15 @@ pub struct ToyKV {
 }
 
 pub fn open(d: &Path) -> Result<ToyKV, ToyKVError> {
+    with_sync(d, WALSync::Full)
+}
+
+pub fn with_sync(d: &Path, sync: WALSync) -> Result<ToyKV, ToyKVError> {
     if !d.is_dir() {
         return Err(ToyKVError::DataDirMissing);
     }
 
-    let mut wal = wal::new(d);
+    let mut wal = wal::new(d, sync);
     let memtable = wal.replay()?;
     let sstables = sstable::new_reader(d)?;
     Ok(ToyKV {

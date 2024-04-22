@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     kvrecord::{KVRecord, KVWriteRecord},
-    ToyKVError,
+    ToyKVError, WALSync,
 };
 
 /*
@@ -45,15 +45,17 @@ const DEFAULT_SEQ: u32 = 1;
 pub(crate) struct WAL {
     wal_path: PathBuf,
     f: Option<File>,
+    sync: WALSync,
 
     /// Number of writes to the WAL since it created
     pub(crate) wal_writes: u32,
 }
 
-pub(crate) fn new(d: &Path) -> WAL {
+pub(crate) fn new(d: &Path, sync: WALSync) -> WAL {
     WAL {
         wal_path: d.join("db.wal"),
         f: None,
+        sync,
         wal_writes: 0,
     }
 }
@@ -120,7 +122,9 @@ impl WAL {
         WALRecord::write_one(file, seq, key, value)?;
         self.wal_writes += 1;
         // file.flush()?;
-        file.sync_all()?;
+        if self.sync == WALSync::Full {
+            file.sync_all()?;
+        }
 
         Ok(())
     }

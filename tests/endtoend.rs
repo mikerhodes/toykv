@@ -1,4 +1,4 @@
-use toykv::ToyKVError;
+use toykv::{ToyKVError, WALSync};
 
 #[test]
 fn insert_and_readback() -> Result<(), ToyKVError> {
@@ -70,7 +70,7 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
 
     let writes = 2500i64;
 
-    let mut db = toykv::open(tmp_dir.path())?;
+    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
     for n in 1..(writes + 1) {
         match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
             Ok(it) => it,
