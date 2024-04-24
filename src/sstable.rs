@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, DirEntry, File, OpenOptions},
     io::{BufReader, Error, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -33,6 +34,49 @@ use crate::kvrecord::{KVRecord, KVWriteRecord};
 /// Implementation is NOT thread safe. A Writer should
 /// have exclusive use of a dir, whereas multiple readers
 /// can safely access concurrently.
+
+/// Manage and search a set of SSTable files on disk.
+pub(crate) struct SSTables {
+    d: PathBuf,
+    sstables: SSTableFileReader,
+}
+
+/// Create a new SSTables whose files live in the directory d.
+pub(crate) fn new_sstables(d: &Path) -> Result<SSTables, Error> {
+    let sstables = new_reader(d)?;
+    Ok(SSTables {
+        d: d.to_path_buf(),
+        sstables,
+    })
+}
+
+impl SSTables {
+    /// Write a new SSTable to the set managed by this
+    /// SSTables. After this method returns, the contents
+    /// of the memtable are durable on disk and are used
+    /// by future calls to `get`.
+    pub(crate) fn write_new_sstable(
+        &mut self,
+        memtable: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<(), Error> {
+        let mut sst = new_writer(self.d.as_path())?;
+        for entry in memtable {
+            sst.write(entry.0, entry.1)?;
+        }
+        sst.finalise()?;
+
+        // Need a new reader to regenerate the file list to
+        // read from.
+        self.sstables = new_reader(self.d.as_path())?;
+        Ok(())
+    }
+
+    /// Retrieve the latest value for `k` in the on disk
+    /// set of sstables.
+    pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.sstables.get(k)
+    }
+}
 
 /// Return the SSTables in dir, ordered newest to oldest.
 ///
@@ -133,14 +177,14 @@ mod tests_sorted_sstable_files {
 }
 
 /// Provides methods to write already-sorted KVRecords to an on-disk file.
-pub(crate) struct SSTableFileWriter {
+struct SSTableFileWriter {
     #[allow(dead_code)] // used in tests to check filepath
     p: PathBuf,
     f: File,
     start: Instant,
 }
 /// Start writing a new immutable file in the dir path.
-pub(crate) fn new_writer(dir: &Path) -> Result<SSTableFileWriter, Error> {
+fn new_writer(dir: &Path) -> Result<SSTableFileWriter, Error> {
     // So basically here we have to read 00000001.data etc and find the
     // greatest number we have so far, then create a path that is inc that
     // number by one.
@@ -186,7 +230,7 @@ impl SSTableFileWriter {
     /// It is assumed that successive calls to write will always use
     /// increasing keys; that is, SSTableFileWriter does not sort keys
     /// itself.
-    pub(crate) fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+    fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         let buf = KVWriteRecord { key, value }.serialize();
         self.f.write_all(&buf)?;
         Ok(())
@@ -194,7 +238,7 @@ impl SSTableFileWriter {
 
     /// Perform the final writes to the file. After this the writer
     /// can be safely dropped.
-    pub(crate) fn finalise(&mut self) -> Result<(), Error> {
+    fn finalise(&mut self) -> Result<(), Error> {
         self.f.flush()?;
         self.f.sync_all()?;
         let elapsed_time = self.start.elapsed();
@@ -231,13 +275,13 @@ mod tests_writer {
 }
 
 /// Iterate entries in an on-disk SSTable.
-pub(crate) struct SSTableFileReader {
+struct SSTableFileReader {
     tables: Vec<BufReader<File>>,
 }
 
 /// Create a new SSTableFileReader that is able to search
 /// for keys in the set of SSTables managed within a folder.
-pub(crate) fn new_reader(dir: &Path) -> Result<SSTableFileReader, Error> {
+fn new_reader(dir: &Path) -> Result<SSTableFileReader, Error> {
     let files = sorted_sstable_files(dir)?;
     let mut tables: Vec<BufReader<File>> = vec![];
     for p in files {
@@ -250,7 +294,7 @@ pub(crate) fn new_reader(dir: &Path) -> Result<SSTableFileReader, Error> {
 impl SSTableFileReader {
     /// Search through the SSTables available to this reader for
     /// a key. Return an Option with its value.
-    pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         // self.tables is in the right order for scanning the sstables
         // on disk. Read each until we find k. If we fall off the end,
         // return None.

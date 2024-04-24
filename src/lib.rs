@@ -1,9 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, path::Path};
 
-use sstable::SSTableFileReader;
+use sstable::SSTables;
 use wal::WAL;
 
 mod kvrecord;
@@ -39,10 +36,9 @@ pub struct ToyKVMetrics {
 
 pub struct ToyKV {
     /// d is the folder that the KV store owns.
-    d: PathBuf,
     memtable: BTreeMap<Vec<u8>, Vec<u8>>,
     wal: WAL,
-    sstables: SSTableFileReader,
+    sstables: SSTables,
     pub metrics: ToyKVMetrics,
 }
 
@@ -57,9 +53,8 @@ pub fn with_sync(d: &Path, sync: WALSync) -> Result<ToyKV, ToyKVError> {
 
     let mut wal = wal::new(d, sync);
     let memtable = wal.replay()?;
-    let sstables = sstable::new_reader(d)?;
+    let sstables = sstable::new_sstables(d)?;
     Ok(ToyKV {
-        d: d.to_path_buf(),
         memtable,
         wal,
         sstables,
@@ -71,23 +66,15 @@ pub fn with_sync(d: &Path, sync: WALSync) -> Result<ToyKV, ToyKVError> {
 const WAL_WRITE_THRESHOLD: u32 = 1000;
 
 impl ToyKV {
-    /// Sets key k to v.
+    /// Set key k to v.
     pub fn set(&mut self, k: Vec<u8>, v: Vec<u8>) -> Result<(), ToyKVError> {
         self.wal.write(&k, &v)?;
         self.memtable.insert(k, v);
         if self.wal.wal_writes >= WAL_WRITE_THRESHOLD {
-            let mut sst = sstable::new_writer(self.d.as_path())?;
-            for entry in &self.memtable {
-                sst.write(entry.0, entry.1)?;
-            }
-            sst.finalise()?;
+            self.sstables.write_new_sstable(&self.memtable)?;
             self.wal.reset()?;
             self.memtable.clear();
             self.metrics.sst_flushes += 1;
-
-            // Need a new reader to regenerate the file list to
-            // read from.
-            self.sstables = sstable::new_reader(self.d.as_path())?;
         }
         self.metrics.writes += 1;
         Ok(())
