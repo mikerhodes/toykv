@@ -276,6 +276,8 @@ mod tests_writer {
 
 /// Iterate entries in an on-disk SSTable.
 struct SSTableFileReader {
+    /// tables maintains a set of BufReaders on every sstable
+    /// file in the set. This isn't that scalable.
     tables: Vec<BufReader<File>>,
 }
 

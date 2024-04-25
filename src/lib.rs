@@ -42,10 +42,12 @@ pub struct ToyKV {
     pub metrics: ToyKVMetrics,
 }
 
+/// Open a database using default settings.
 pub fn open(d: &Path) -> Result<ToyKV, ToyKVError> {
     with_sync(d, WALSync::Full)
 }
 
+/// Open a database using a specific WALSync strategy.
 pub fn with_sync(d: &Path, sync: WALSync) -> Result<ToyKV, ToyKVError> {
     if !d.is_dir() {
         return Err(ToyKVError::DataDirMissing);
