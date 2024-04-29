@@ -31,9 +31,10 @@ use crate::kvrecord::{KVRecord, KVWriteRecord};
 /// As this is toykv and not productionkv, we use a very
 /// simple file format of KVRecords streamed to disk.
 ///
-/// Implementation is NOT thread safe. A Writer should
-/// have exclusive use of a dir, whereas multiple readers
-/// can safely access concurrently.
+/// Implementation is NOT thread safe. We hold open BufReaders
+/// to files, so multiple readers would stomp all over each
+/// other. Multiple writers, meanwhile, would just totally
+/// make a mess that probably wouldn't be recoverable.
 
 /// Manage and search a set of SSTable files on disk.
 pub(crate) struct SSTables {
