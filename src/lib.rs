@@ -13,6 +13,8 @@ pub enum ToyKVError {
     DataDirMissing,
     FileError(std::io::Error),
     BadWALState,
+    KeyTooLarge,
+    ValueTooLarge,
 }
 
 impl From<std::io::Error> for ToyKVError {
@@ -66,10 +68,18 @@ pub fn with_sync(d: &Path, sync: WALSync) -> Result<ToyKV, ToyKVError> {
 
 /// How many writes to a WAL before we SSTable it.
 const WAL_WRITE_THRESHOLD: u32 = 1000;
+const MAX_KEY_SIZE: usize = 10_240; // 10kb
+const MAX_VALUE_SIZE: usize = 102_400; // 100kb
 
 impl ToyKV {
     /// Set key k to v.
     pub fn set(&mut self, k: Vec<u8>, v: Vec<u8>) -> Result<(), ToyKVError> {
+        if k.len() > MAX_KEY_SIZE {
+            return Err(ToyKVError::KeyTooLarge);
+        }
+        if v.len() > MAX_VALUE_SIZE {
+            return Err(ToyKVError::ValueTooLarge);
+        }
         self.wal.write(&k, &v)?;
         self.memtable.insert(k, v);
         if self.wal.wal_writes >= WAL_WRITE_THRESHOLD {
