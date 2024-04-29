@@ -5,12 +5,15 @@ use toykv::ToyKVError;
 fn main() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
-    let writes = 2500i64;
+    let writes = 2500u32;
 
     let now = Instant::now();
     let mut db = toykv::open(tmp_dir.path())?;
     let elapsed_time = now.elapsed();
-    println!("Running open() took {}ms.", elapsed_time.as_millis());
+    println!(
+        "Running open() took {}ms.",
+        elapsed_time.as_micros() as f64 / 1000f64
+    );
 
     let now = Instant::now();
     for n in 1..(writes + 1) {
@@ -35,7 +38,12 @@ fn main() -> Result<(), ToyKVError> {
         );
     }
     let elapsed_time = now.elapsed();
-    println!("Running read() took {}ms.", elapsed_time.as_millis());
+    println!(
+        "Running read() {} times took {}ms ({}ms per read).",
+        writes,
+        elapsed_time.as_millis(),
+        ((elapsed_time / writes).as_micros()) as f64 / 1000.0
+    );
 
     Ok(())
 }
