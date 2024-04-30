@@ -13,6 +13,7 @@ pub enum ToyKVError {
     DataDirMissing,
     FileError(std::io::Error),
     BadWALState,
+    BadWALSeq { expected: u32, actual: u32 },
     KeyTooLarge,
     ValueTooLarge,
 }

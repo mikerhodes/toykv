@@ -7,6 +7,8 @@ application.
 It does almost nothing you'd want an actual place you put data to do:
 
 - Doesn't bother checksumming any data. Bit flips for the win!
+  - Although we do use a sequence on each record in the WAL file to do a simple
+    check that the WAL is valid.
 - ~~Opens files every time it reads or writes them. Every. Single. Time.~~ Fixed
   with
   [c9006a4](https://github.com/mikerhodes/toykv/commit/c9006a4047a7e4db68c10752ff1113d8788784dd)

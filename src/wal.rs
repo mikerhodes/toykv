@@ -39,13 +39,11 @@ Valid `op` values:
 const WAL_MAGIC: u8 = b'w';
 const OP_SET: u8 = 1u8;
 
-// TODO this shouldn't exist when we implement seq in records
-const DEFAULT_SEQ: u32 = 1;
-
 pub(crate) struct WAL {
     wal_path: PathBuf,
     f: Option<File>,
     sync: WALSync,
+    nextseq: u32,
 
     /// Number of writes to the WAL since it created
     pub(crate) wal_writes: u32,
@@ -56,6 +54,7 @@ pub(crate) fn new(d: &Path, sync: WALSync) -> WAL {
         wal_path: d.join("db.wal"),
         f: None,
         sync,
+        nextseq: 0,
         wal_writes: 0,
     }
 }
@@ -93,9 +92,15 @@ impl WAL {
             let rec = WALRecord::read_one(&mut bytes)?;
             match rec {
                 Some(wr) => {
-                    assert_eq!(wr.seq, DEFAULT_SEQ, "Unexpected seq code");
+                    if wr.seq != self.nextseq {
+                        return Err(ToyKVError::BadWALSeq {
+                            expected: self.nextseq,
+                            actual: wr.seq,
+                        });
+                    }
                     assert_eq!(wr.op, OP_SET, "Unexpected op code");
                     memtable.insert(wr.key, wr.value);
+                    self.nextseq = wr.seq + 1;
                     self.wal_writes += 1;
                     cnt += 1;
                 }
@@ -103,7 +108,10 @@ impl WAL {
             };
         }
 
-        println!("Replayed {} records from WAL.", cnt);
+        println!(
+            "Replayed {} records from WAL. nextseq={}.",
+            cnt, self.nextseq
+        );
 
         self.f = Some(file);
 
@@ -116,7 +124,7 @@ impl WAL {
             return Err(ToyKVError::BadWALState);
         }
 
-        let seq = DEFAULT_SEQ; // TODO implement sequence numbers for records
+        let seq = self.nextseq;
 
         let file = self.f.as_mut().unwrap();
         WALRecord::write_one(file, seq, key, value)?;
@@ -125,6 +133,8 @@ impl WAL {
         if self.sync == WALSync::Full {
             file.sync_all()?;
         }
+
+        self.nextseq += 1;
 
         Ok(())
     }
@@ -154,6 +164,7 @@ impl WAL {
             .create(true)
             .open(self.wal_path.as_path())?;
         self.f = Some(file);
+        self.nextseq = 0;
         self.wal_writes = 0;
         Ok(())
     }
