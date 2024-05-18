@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    kvrecord::{KVRecord, KVWriteRecord},
+    kvrecord::{KVRecord, KVValue, KVWriteRecord, KVWriteValue},
     ToyKVError, WALSync,
 };
 
@@ -67,7 +67,7 @@ pub(crate) fn new(d: &Path, sync: WALSync) -> WAL {
 
 impl WAL {
     /// Replays the WAL into a memtable. Call this first.
-    pub(crate) fn replay(&mut self) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, ToyKVError> {
+    pub(crate) fn replay(&mut self) -> Result<BTreeMap<Vec<u8>, KVValue>, ToyKVError> {
         if self.f.is_some() {
             return Err(ToyKVError::BadWALState);
         }
@@ -119,7 +119,7 @@ impl WAL {
     }
 
     /// Appends entry to WAL
-    pub(crate) fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), ToyKVError> {
+    pub(crate) fn write(&mut self, key: &[u8], value: KVWriteValue) -> Result<(), ToyKVError> {
         if self.f.is_none() {
             return Err(ToyKVError::BadWALState);
         }
@@ -178,7 +178,7 @@ struct WALRecord {
     op: u8,
     // From embedded KVRecord
     key: Vec<u8>,
-    value: Vec<u8>,
+    value: KVValue,
 }
 impl WALRecord {
     /// Read a single WAL record from a WAL file (or other Read struct).
@@ -220,7 +220,12 @@ impl WALRecord {
     ///
     /// This doesn't take a WALRecord so we can take slices of the data to
     /// write rather than a copy, as we don't need a copy.
-    fn write_one<T: Write>(w: &mut T, seq: u32, key: &[u8], value: &[u8]) -> Result<(), Error> {
+    fn write_one<T: Write>(
+        w: &mut T,
+        seq: u32,
+        key: &[u8],
+        value: KVWriteValue,
+    ) -> Result<(), Error> {
         // Create our record and attempt to write
         // it out in one go.
         let mut buf = Vec::<u8>::new();

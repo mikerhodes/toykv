@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
+use kvrecord::KVValue;
 use sstable::SSTables;
 use wal::WAL;
 
@@ -35,11 +36,12 @@ pub struct ToyKVMetrics {
     pub sst_flushes: u64,
     pub reads: u64,
     pub writes: u64,
+    pub deletes: u64,
 }
 
 pub struct ToyKV {
     /// d is the folder that the KV store owns.
-    memtable: BTreeMap<Vec<u8>, Vec<u8>>,
+    memtable: BTreeMap<Vec<u8>, KVValue>,
     wal: WAL,
     sstables: SSTables,
     pub metrics: ToyKVMetrics,
@@ -81,7 +83,22 @@ impl ToyKV {
         if v.len() > MAX_VALUE_SIZE {
             return Err(ToyKVError::ValueTooLarge);
         }
-        self.wal.write(&k, &v)?;
+        self.metrics.writes += 1;
+        self.write(k, kvrecord::KVValue::Some(v))
+    }
+
+    /// Delete the stored value for k.
+    pub fn delete(&mut self, k: Vec<u8>) -> Result<(), ToyKVError> {
+        if k.len() > MAX_KEY_SIZE {
+            return Err(ToyKVError::KeyTooLarge);
+        }
+        self.metrics.deletes += 1;
+        self.write(k, KVValue::Deleted)
+    }
+
+    /// Internal method to write a KVValue to WAL and memtable
+    fn write(&mut self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
+        self.wal.write(&k, (&v).into())?;
         self.memtable.insert(k, v);
         if self.wal.wal_writes >= WAL_WRITE_THRESHOLD {
             self.sstables.write_new_sstable(&self.memtable)?;
@@ -89,21 +106,33 @@ impl ToyKV {
             self.memtable.clear();
             self.metrics.sst_flushes += 1;
         }
-        self.metrics.writes += 1;
         Ok(())
     }
 
     /// Get the value for k.
     pub fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, ToyKVError> {
+        if k.len() > MAX_KEY_SIZE {
+            return Err(ToyKVError::KeyTooLarge);
+        }
         let r = self.memtable.get(k);
         let r = match r {
-            Some(r) => Some(r.clone()),
+            Some(r) => Some(r.to_owned()),
             None => self.sstables.get(k)?,
         };
+
+        // This is the moment where we consume the KVValue::Deleted
+        // to hide it from the caller.
+        let r = match r {
+            None => None,
+            Some(kvv) => match kvv {
+                KVValue::Deleted => None,
+                KVValue::Some(v) => Some(v),
+            },
+        };
+
         self.metrics.reads += 1;
         Ok(r)
     }
-
     /// Perform a graceful shutdown.
     pub fn shutdown(&mut self) {}
 

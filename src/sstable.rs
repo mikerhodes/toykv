@@ -6,7 +6,10 @@ use std::{
     time::Instant,
 };
 
-use crate::kvrecord::{KVRecord, KVWriteRecord};
+use crate::{
+    kvrecord::{KVRecord, KVWriteRecord, KVWriteValue},
+    KVValue,
+};
 
 /// Provides types and functions to manage operations on a
 /// set of SSTables on-disk. In toykv, we have one "branch"
@@ -58,11 +61,11 @@ impl SSTables {
     /// by future calls to `get`.
     pub(crate) fn write_new_sstable(
         &mut self,
-        memtable: &BTreeMap<Vec<u8>, Vec<u8>>,
+        memtable: &BTreeMap<Vec<u8>, KVValue>,
     ) -> Result<(), Error> {
         let mut sst = new_writer(self.d.as_path())?;
         for entry in memtable {
-            sst.write(entry.0, entry.1)?;
+            sst.write(entry.0, entry.1.into())?;
         }
         sst.finalise()?;
 
@@ -74,7 +77,7 @@ impl SSTables {
 
     /// Retrieve the latest value for `k` in the on disk
     /// set of sstables.
-    pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
         self.sstables.get(k)
     }
 }
@@ -231,7 +234,9 @@ impl SSTableFileWriter {
     /// It is assumed that successive calls to write will always use
     /// increasing keys; that is, SSTableFileWriter does not sort keys
     /// itself.
-    fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+    fn write(&mut self, key: &[u8], value: KVWriteValue) -> Result<(), Error> {
+        // TODO pass all things down as KVValue and put that definition next
+        // to KVRecord?
         let buf = KVWriteRecord { key, value }.serialize();
         self.f.write_all(&buf)?;
         Ok(())
@@ -252,6 +257,8 @@ impl SSTableFileWriter {
 mod tests_writer {
     use std::io::Error;
 
+    use crate::kvrecord;
+
     use super::*;
 
     #[test]
@@ -259,7 +266,7 @@ mod tests_writer {
         let tmp_dir = tempfile::tempdir().unwrap();
         let mut w = new_writer(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000001.data"));
-        w.write(&[1, 2, 3], &[1, 2, 3, 4])?;
+        w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[1, 2, 3, 4]))?;
         w.finalise()?;
 
         let w = new_writer(tmp_dir.path())?;
@@ -297,7 +304,7 @@ fn new_reader(dir: &Path) -> Result<SSTableFileReader, Error> {
 impl SSTableFileReader {
     /// Search through the SSTables available to this reader for
     /// a key. Return an Option with its value.
-    fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
         // self.tables is in the right order for scanning the sstables
         // on disk. Read each until we find k. If we fall off the end,
         // return None.
@@ -310,7 +317,7 @@ impl SSTableFileReader {
                     Some(kv) => {
                         // We found it!
                         if kv.key == k {
-                            return Ok(Some(kv.value.clone()));
+                            return Ok(Some(kv.value));
                         }
                         // Gone beyond the key, stop scanning
                         // this file, go to next.
@@ -329,6 +336,8 @@ impl SSTableFileReader {
 mod tests_reader {
     use std::io::Error;
 
+    use crate::kvrecord;
+
     use super::*;
 
     #[test]
@@ -336,11 +345,11 @@ mod tests_reader {
         let tmp_dir = tempfile::tempdir().unwrap();
         let mut w = new_writer(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000001.data"));
-        w.write(&[1, 2, 3], &[1, 2, 3, 4])?;
+        w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[1, 2, 3, 4]))?;
         w.finalise()?;
 
         let mut r = new_reader(tmp_dir.path())?;
-        assert_eq!(r.get(&[1, 2, 3])?, Some(vec![1, 2, 3, 4]));
+        assert_eq!(r.get(&[1, 2, 3])?.unwrap(), KVValue::Some(vec![1, 2, 3, 4]));
         assert_eq!(r.get(&[14])?, None);
 
         Ok(())
@@ -351,13 +360,13 @@ mod tests_reader {
         let tmp_dir = tempfile::tempdir().unwrap();
         let mut w = new_writer(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000001.data"));
-        w.write(&[1, 2, 3], &[1, 2, 3, 4])?;
-        w.write(&[23, 24], &[100, 122, 4])?;
-        w.write(&[66, 23, 24], &[100, 122, 4])?;
+        w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[1, 2, 3, 4]))?;
+        w.write(&[23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
+        w.write(&[66, 23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
         w.finalise()?;
 
         let mut w = new_writer(tmp_dir.path())?;
-        w.write(&[23, 24], &[100, 122, 4])?;
+        w.write(&[23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
         w.finalise()?;
         assert_eq!(w.p, tmp_dir.path().join("0000000002.data"));
 
@@ -366,12 +375,12 @@ mod tests_reader {
 
         let mut w = new_writer(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000004.data"));
-        w.write(&[1, 2, 3], &[6, 7, 8, 9])?; // set new value in newer layer
+        w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[6, 7, 8, 9]))?; // set new value in newer layer
         w.finalise()?;
 
         let mut r = new_reader(tmp_dir.path())?;
-        assert_eq!(r.get(&[1, 2, 3])?, Some(vec![6, 7, 8, 9]));
-        assert_eq!(r.get(&[23, 24])?, Some(vec![100, 122, 4]));
+        assert_eq!(r.get(&[1, 2, 3])?.unwrap(), KVValue::Some(vec![6, 7, 8, 9]));
+        assert_eq!(r.get(&[23, 24])?.unwrap(), KVValue::Some(vec![100, 122, 4]));
         assert_eq!(r.get(&[14])?, None);
 
         Ok(())

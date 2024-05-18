@@ -102,3 +102,60 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
 
     Ok(())
 }
+
+/// Tests that deletes are retrievable from both memtable and sstable
+#[test]
+fn deletes() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    let writes = 2500i64;
+
+    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+
+    let k = "foo".as_bytes().to_vec();
+    db.set(k.clone(), "bar".as_bytes().to_vec())?;
+    assert_eq!(db.get(&k)?.unwrap(), "bar".as_bytes().to_vec());
+
+    db.delete(k.clone())?;
+    assert!(matches!(db.get(&k)?, None));
+
+    for n in 1..(writes + 1) {
+        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
+    }
+    assert_eq!(2, db.metrics.sst_flushes);
+    assert_eq!(writes as u64 + 1, db.metrics.writes);
+    assert_eq!(2, db.metrics.reads);
+    assert_eq!(1, db.metrics.deletes);
+
+    assert!(matches!(db.get(&k)?, None));
+
+    // We can write it again
+    db.set(k.clone(), "baz".as_bytes().to_vec())?;
+    assert_eq!(db.get(&k)?.unwrap(), "baz".as_bytes().to_vec());
+
+    db.set(k.clone(), "blorp".as_bytes().to_vec())?;
+    for n in 1..(writes + 1) {
+        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
+    }
+    assert_eq!(5, db.metrics.sst_flushes); // 5000 writes => 5 flushes
+    assert_eq!(writes as u64 * 2 + 3, db.metrics.writes);
+    assert_eq!(4, db.metrics.reads);
+    assert_eq!(1, db.metrics.deletes);
+
+    assert_eq!(db.get(&k)?.unwrap(), "blorp".as_bytes().to_vec());
+
+    db.shutdown();
+
+    let mut db2 = toykv::open(tmp_dir.path())?;
+    assert_eq!(db2.get(&k)?.unwrap(), "blorp".as_bytes().to_vec());
+    db2.delete(k.clone())?;
+    assert!(matches!(db2.get(&k)?, None));
+
+    Ok(())
+}
