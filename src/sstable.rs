@@ -316,7 +316,7 @@ impl SSTableFileReader {
                     None => break, // end of SSTable, go to next
                     Some(kv) => {
                         // We found it!
-                        if kv.key == k {
+                        if kv.key.as_slice() == k {
                             return Ok(Some(kv.value));
                         }
                         // Gone beyond the key, stop scanning

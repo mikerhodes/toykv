@@ -76,7 +76,13 @@ const MAX_VALUE_SIZE: usize = 102_400; // 100kb
 
 impl ToyKV {
     /// Set key k to v.
-    pub fn set(&mut self, k: Vec<u8>, v: Vec<u8>) -> Result<(), ToyKVError> {
+    pub fn set<S, T>(&mut self, k: S, v: T) -> Result<(), ToyKVError>
+    where
+        S: Into<Vec<u8>>,
+        T: Into<Vec<u8>>,
+    {
+        let k: Vec<u8> = k.into();
+        let v: Vec<u8> = v.into();
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
@@ -88,7 +94,11 @@ impl ToyKV {
     }
 
     /// Delete the stored value for k.
-    pub fn delete(&mut self, k: Vec<u8>) -> Result<(), ToyKVError> {
+    pub fn delete<S>(&mut self, k: S) -> Result<(), ToyKVError>
+    where
+        S: Into<Vec<u8>>,
+    {
+        let k: Vec<u8> = k.into();
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
@@ -110,14 +120,18 @@ impl ToyKV {
     }
 
     /// Get the value for k.
-    pub fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, ToyKVError> {
+    pub fn get<S>(&mut self, k: S) -> Result<Option<Vec<u8>>, ToyKVError>
+    where
+        S: Into<Vec<u8>>,
+    {
+        let k: Vec<u8> = k.into();
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
-        let r = self.memtable.get(k);
+        let r = self.memtable.get(&k);
         let r = match r {
             Some(r) => Some(r.to_owned()),
-            None => self.sstables.get(k)?,
+            None => self.sstables.get(&k)?,
         };
 
         // This is the moment where we consume the KVValue::Deleted
