@@ -294,12 +294,10 @@ fn new_file_reader(path: PathBuf) -> Result<SSTableFileReader, Error> {
 impl SSTableFileReader {
     /// Search this SSTable file for a key
     fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
-        self.f.seek(SeekFrom::Start(0))?;
-        loop {
-            let kv = KVRecord::read_one(&mut self.f)?;
-            match kv {
-                None => return Ok(None), // end of SSTable, go to next
-                Some(kv) => {
+        self.reset()?;
+        for x in self {
+            match x {
+                Ok(kv) => {
                     // We found it!
                     if kv.key.as_slice() == k {
                         return Ok(Some(kv.value));
@@ -310,7 +308,33 @@ impl SSTableFileReader {
                         return Ok(None);
                     }
                 }
+                Err(e) => return Err(e),
             }
+        }
+        Ok(None)
+    }
+
+    fn reset(&mut self) -> Result<(), Error> {
+        self.f.seek(SeekFrom::Start(0))?;
+        Ok(())
+    }
+}
+
+/// Iterate over the file, from wherever we are up to
+/// right now. Call reset() to reset the iterator prior
+/// to use, to ensure starting from the beginning of the
+/// SSTable.
+impl Iterator for SSTableFileReader {
+    type Item = Result<KVRecord, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let kv = KVRecord::read_one(&mut self.f);
+        match kv {
+            Ok(kv) => match kv {
+                Some(kv) => Some(Ok(kv)),
+                None => None, // reached the end of the file
+            },
+            Err(e) => Some(Err(e)),
         }
     }
 }
