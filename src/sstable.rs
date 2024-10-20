@@ -318,6 +318,30 @@ impl SSTableFileReader {
         self.f.seek(SeekFrom::Start(0))?;
         Ok(())
     }
+
+    // Probably going to want something like SeekGE and SeekLT for
+    // enabling range queries. Pebble provides for multiple readers
+    // via returning multiple iterators --- plausibly we could do
+    // something similar, but for now going to assume that there's
+    // just the one reader so we don't have to have separate iterator
+    // stuff --- although I guess for doing >1 iterator you'd just
+    // open a new file handle to each or something if you wanted
+    // something easy. But for now let's not, we'll just assume
+    // a single thread such that seek/reset can be safely called
+    // to shift around the read location in the file.
+    // The primary complexity of the seeks, is that we need to figure
+    // out how to have the iterator's next() return the right thing,
+    // as for both we will need to have read ahead of the iterator.
+    // In SeekGE we will have read the first item to be returned,
+    // and in SeekLT we will have had to have read the item to
+    // be returned to figure out that we have seeked to the right
+    // place.
+    // Possibly we only need SeekLT for an inclusive start, assuming
+    // SeekLT("B") would return you all the "B" entries. Not sure
+    // whether SeekGE would return you from entry _after_ the first
+    // "B"
+    // https://pkg.go.dev/github.com/cockroachdb/pebble#Iterator.SeekGE
+    // https://pkg.go.dev/github.com/cockroachdb/pebble#Iterator.SeekLT
 }
 
 /// Iterate over the file, from wherever we are up to
