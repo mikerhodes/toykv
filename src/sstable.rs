@@ -282,21 +282,53 @@ mod tests_writer {
     }
 }
 
+/// Reader for single SSTable file on disk
+struct SSTableFileReader {
+    f: BufReader<File>,
+}
+fn new_file_reader(path: PathBuf) -> Result<SSTableFileReader, Error> {
+    let f = OpenOptions::new().read(true).open(path)?;
+    let br = BufReader::with_capacity(256 * 1024, f);
+    Ok(SSTableFileReader { f: br })
+}
+impl SSTableFileReader {
+    /// Search this SSTable file for a key
+    fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
+        self.f.seek(SeekFrom::Start(0))?;
+        loop {
+            let kv = KVRecord::read_one(&mut self.f)?;
+            match kv {
+                None => return Ok(None), // end of SSTable, go to next
+                Some(kv) => {
+                    // We found it!
+                    if kv.key.as_slice() == k {
+                        return Ok(Some(kv.value));
+                    }
+                    // Gone beyond the key, stop scanning
+                    // this file, return None as it isn't here.
+                    if kv.key.as_slice() > k {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Iterate entries in an on-disk SSTable.
 struct SSTablesReader {
     /// tables maintains a set of BufReaders on every sstable
     /// file in the set. This isn't that scalable.
-    tables: Vec<BufReader<File>>,
+    tables: Vec<SSTableFileReader>,
 }
 
 /// Create a new SSTableFileReader that is able to search
 /// for keys in the set of SSTables managed within a folder.
 fn new_reader(dir: &Path) -> Result<SSTablesReader, Error> {
     let files = sorted_sstable_files(dir)?;
-    let mut tables: Vec<BufReader<File>> = vec![];
+    let mut tables: Vec<SSTableFileReader> = vec![];
     for p in files {
-        let f = OpenOptions::new().read(true).open(p.path())?;
-        tables.push(BufReader::with_capacity(256 * 1024, f));
+        tables.push(new_file_reader(p.path())?);
     }
     Ok(SSTablesReader { tables })
 }
@@ -306,26 +338,12 @@ impl SSTablesReader {
     /// a key. Return an Option with its value.
     fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
         // self.tables is in the right order for scanning the sstables
-        // on disk. Read each until we find k. If we fall off the end,
-        // return None.
+        // on disk. Read each to find k. If no SSTable file contains
+        // k, return None.
         for t in self.tables.as_mut_slice() {
-            t.seek(SeekFrom::Start(0))?;
-            loop {
-                let kv = KVRecord::read_one(t)?;
-                match kv {
-                    None => break, // end of SSTable, go to next
-                    Some(kv) => {
-                        // We found it!
-                        if kv.key.as_slice() == k {
-                            return Ok(Some(kv.value));
-                        }
-                        // Gone beyond the key, stop scanning
-                        // this file, go to next.
-                        if kv.key.as_slice() > k {
-                            break;
-                        }
-                    }
-                }
+            match t.get(k)? {
+                Some(v) => return Ok(Some(v)),
+                None => continue, // not found in this SSTable
             }
         }
         // Otherwise, we didn't find it.
