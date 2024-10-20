@@ -42,7 +42,7 @@ use crate::{
 /// Manage and search a set of SSTable files on disk.
 pub(crate) struct SSTables {
     d: PathBuf,
-    sstables: SSTableFileReader,
+    sstables: SSTablesReader,
 }
 
 /// Create a new SSTables whose files live in the directory d.
@@ -283,7 +283,7 @@ mod tests_writer {
 }
 
 /// Iterate entries in an on-disk SSTable.
-struct SSTableFileReader {
+struct SSTablesReader {
     /// tables maintains a set of BufReaders on every sstable
     /// file in the set. This isn't that scalable.
     tables: Vec<BufReader<File>>,
@@ -291,17 +291,17 @@ struct SSTableFileReader {
 
 /// Create a new SSTableFileReader that is able to search
 /// for keys in the set of SSTables managed within a folder.
-fn new_reader(dir: &Path) -> Result<SSTableFileReader, Error> {
+fn new_reader(dir: &Path) -> Result<SSTablesReader, Error> {
     let files = sorted_sstable_files(dir)?;
     let mut tables: Vec<BufReader<File>> = vec![];
     for p in files {
         let f = OpenOptions::new().read(true).open(p.path())?;
         tables.push(BufReader::with_capacity(256 * 1024, f));
     }
-    Ok(SSTableFileReader { tables })
+    Ok(SSTablesReader { tables })
 }
 
-impl SSTableFileReader {
+impl SSTablesReader {
     /// Search through the SSTables available to this reader for
     /// a key. Return an Option with its value.
     fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
