@@ -33,7 +33,7 @@ pub(crate) enum KVValue {
     Some(Vec<u8>),
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Debug, Clone)]
 /// Read-optimised KVRecord. It uses Vec<u8> for data to
 /// allow the structure to own the data.
 pub(crate) struct KVRecord {

@@ -292,7 +292,10 @@ fn new_file_reader(path: PathBuf) -> Result<SSTableFileReader, Error> {
     Ok(SSTableFileReader { f: br })
 }
 impl SSTableFileReader {
-    /// Search this SSTable file for a key
+    /// Search this SSTable file for a key.
+    /// This advances the iterator until it finds the key,
+    /// or first item greater than the key. Reset or seek
+    /// the iterator after using.
     fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
         self.reset()?;
         for x in self {
@@ -342,6 +345,41 @@ impl SSTableFileReader {
     // "B"
     // https://pkg.go.dev/github.com/cockroachdb/pebble#Iterator.SeekGE
     // https://pkg.go.dev/github.com/cockroachdb/pebble#Iterator.SeekLT
+    // Possibly we can use the Rust trait's drop_while method to implement
+    // at least one of the seeks.
+
+    // Seeks forward from the iterator's current location to place
+    // the iterator at the first item greater than or equal to the
+    // passed key.
+    // fn seekGE(&mut self, k: &[u8]) -> Result<(), Error> {
+    //     let peekable = self.peekable();
+    //     for x in peekable { // hmm this probably still advances us too far.
+    // it might be that we have to always store the next item
+    // to return
+    // I don't get how this is so hard. Probably it isn't, there's
+    // just some mind set flip I need to figure it.
+    // ACTUALLY, maybe the SSTableFile iterator just needs to be
+    // a normal iterator with only reset. In the reading methods,
+    // we can wrap this iterator with a skip_while iterator to
+    // read the file until we get to the right place. We can wrap
+    // it with a peekable iterator if we need to peek it (eg when
+    // range scanning across SSTables). This feels like it might
+    // be what I need rather than this basic file iterator supporting
+    // all that internally (given that supporting it internally is
+    // not any more optimised as yet, if for example we could do something
+    // smart with seek like a binary search rather than a scan, then it'd
+    // be worth implementing here; then we'd probably have something like
+    // a page structure, and this would in fact have a seek-page-with
+    // -matching-key type method. So everything would differ anyway).
+    // NEED an iterator over the btree, albeit it likely has one.
+    //         match x {
+    //             Ok(kv) => {
+    //                 if kv.key.as_slice() >=
+    //             }
+    //         }
+    //     }
+    //     Ok(())
+    // }
 }
 
 /// Iterate over the file, from wherever we are up to

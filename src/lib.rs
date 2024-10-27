@@ -5,6 +5,7 @@ use sstable::SSTables;
 use wal::WAL;
 
 mod kvrecord;
+mod merge_iterator;
 mod sstable;
 mod wal;
 
