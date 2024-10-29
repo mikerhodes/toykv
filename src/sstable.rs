@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     kvrecord::{KVRecord, KVWriteRecord, KVWriteValue},
+    merge_iterator::{self, MergeIterator},
     KVValue,
 };
 
@@ -435,6 +436,16 @@ impl SSTablesReader {
         // Otherwise, we didn't find it.
         Ok(None)
     }
+
+    fn scan(&mut self) -> MergeIterator {
+        // We could create a set of new SSTableFileReader
+        // iterators for this, but probably we want to figure
+        // out what borrowing looks like, because otherwise
+        // we have to create new file handles on our files,
+        // which seems a bit pointless. But even if pointless
+        // might get us started more quickly.
+        merge_iterator::new_merge_iterator(vec![])
+    }
 }
 #[cfg(test)]
 mod tests_reader {
@@ -486,6 +497,46 @@ mod tests_reader {
         assert_eq!(r.get(&[1, 2, 3])?.unwrap(), KVValue::Some(vec![6, 7, 8, 9]));
         assert_eq!(r.get(&[23, 24])?.unwrap(), KVValue::Some(vec![100, 122, 4]));
         assert_eq!(r.get(&[14])?, None);
+
+        Ok(())
+    }
+
+    fn kv(k: &[u8], v: &[u8]) -> KVRecord {
+        KVRecord {
+            key: k.into(),
+            value: crate::KVValue::Some(v.into()),
+        }
+    }
+
+    #[test]
+    fn test_scan_sstables() -> Result<(), Error> {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut w = new_writer(tmp_dir.path())?;
+        assert_eq!(w.p, tmp_dir.path().join("0000000001.data"));
+        w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[1, 2, 3, 4]))?;
+        w.write(&[23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
+        w.write(&[66, 23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
+        w.finalise()?;
+
+        let mut w = new_writer(tmp_dir.path())?;
+        w.write(&[23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
+        w.finalise()?;
+        assert_eq!(w.p, tmp_dir.path().join("0000000002.data"));
+
+        let w = new_writer(tmp_dir.path())?;
+        assert_eq!(w.p, tmp_dir.path().join("0000000003.data"));
+
+        let mut w = new_writer(tmp_dir.path())?;
+        assert_eq!(w.p, tmp_dir.path().join("0000000004.data"));
+        w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[6, 7, 8, 9]))?; // set new value in newer layer
+        w.finalise()?;
+
+        let mut r = new_reader(tmp_dir.path())?;
+        let mut records = r.scan();
+        assert_eq!(records.next(), Some(kv(&[1, 2, 3], &[6, 7, 8, 9])));
+        assert_eq!(records.next(), Some(kv(&[23, 24], &[100, 122, 4])));
+        assert_eq!(records.next(), Some(kv(&[66, 23, 24], &[100, 122, 4])));
+        assert_eq!(records.next(), None);
 
         Ok(())
     }
