@@ -322,65 +322,6 @@ impl SSTableFileReader {
         self.f.seek(SeekFrom::Start(0))?;
         Ok(())
     }
-
-    // Probably going to want something like SeekGE and SeekLT for
-    // enabling range queries. Pebble provides for multiple readers
-    // via returning multiple iterators --- plausibly we could do
-    // something similar, but for now going to assume that there's
-    // just the one reader so we don't have to have separate iterator
-    // stuff --- although I guess for doing >1 iterator you'd just
-    // open a new file handle to each or something if you wanted
-    // something easy. But for now let's not, we'll just assume
-    // a single thread such that seek/reset can be safely called
-    // to shift around the read location in the file.
-    // The primary complexity of the seeks, is that we need to figure
-    // out how to have the iterator's next() return the right thing,
-    // as for both we will need to have read ahead of the iterator.
-    // In SeekGE we will have read the first item to be returned,
-    // and in SeekLT we will have had to have read the item to
-    // be returned to figure out that we have seeked to the right
-    // place.
-    // Possibly we only need SeekLT for an inclusive start, assuming
-    // SeekLT("B") would return you all the "B" entries. Not sure
-    // whether SeekGE would return you from entry _after_ the first
-    // "B"
-    // https://pkg.go.dev/github.com/cockroachdb/pebble#Iterator.SeekGE
-    // https://pkg.go.dev/github.com/cockroachdb/pebble#Iterator.SeekLT
-    // Possibly we can use the Rust trait's drop_while method to implement
-    // at least one of the seeks.
-
-    // Seeks forward from the iterator's current location to place
-    // the iterator at the first item greater than or equal to the
-    // passed key.
-    // fn seekGE(&mut self, k: &[u8]) -> Result<(), Error> {
-    //     let peekable = self.peekable();
-    //     for x in peekable { // hmm this probably still advances us too far.
-    // it might be that we have to always store the next item
-    // to return
-    // I don't get how this is so hard. Probably it isn't, there's
-    // just some mind set flip I need to figure it.
-    // ACTUALLY, maybe the SSTableFile iterator just needs to be
-    // a normal iterator with only reset. In the reading methods,
-    // we can wrap this iterator with a skip_while iterator to
-    // read the file until we get to the right place. We can wrap
-    // it with a peekable iterator if we need to peek it (eg when
-    // range scanning across SSTables). This feels like it might
-    // be what I need rather than this basic file iterator supporting
-    // all that internally (given that supporting it internally is
-    // not any more optimised as yet, if for example we could do something
-    // smart with seek like a binary search rather than a scan, then it'd
-    // be worth implementing here; then we'd probably have something like
-    // a page structure, and this would in fact have a seek-page-with
-    // -matching-key type method. So everything would differ anyway).
-    // NEED an iterator over the btree, albeit it likely has one.
-    //         match x {
-    //             Ok(kv) => {
-    //                 if kv.key.as_slice() >=
-    //             }
-    //         }
-    //     }
-    //     Ok(())
-    // }
 }
 
 /// Iterate over the file, from wherever we are up to
@@ -444,7 +385,13 @@ impl SSTablesReader {
         // we have to create new file handles on our files,
         // which seems a bit pointless. But even if pointless
         // might get us started more quickly.
-        merge_iterator::new_merge_iterator(vec![])
+        // merge_iterator::new_merge_iterator(vec![])
+        let mut vec = vec![];
+        for t in self.tables.as_slice() {
+            let mut i = (&t).filter(|x| x.is_ok()).map(|x| x.unwrap())
+            vec.push(&mut i as (&mut dyn Iterator<Item = KVRecord>));
+        }
+        merge_iterator::new_merge_iterator(vec)
     }
 }
 #[cfg(test)]
