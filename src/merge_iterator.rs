@@ -1,4 +1,4 @@
-use std::iter::Peekable;
+use std::{io::Error, iter::Peekable};
 
 use crate::kvrecord::KVRecord;
 
@@ -8,22 +8,27 @@ use crate::kvrecord::KVRecord;
 /// iterators contain KVRecords with the same key, the tie is broken
 /// by returning the KVRecord from the child iterator with the lowest
 /// index.
-pub(crate) struct MergeIterator<'a> {
-    iters: Vec<Peekable<&'a mut (dyn Iterator<Item = KVRecord> + 'a)>>,
+pub(crate) struct MergeIterator {
+    iters: Vec<Peekable<Box<dyn Iterator<Item = Result<KVRecord, Error>>>>>,
+    stopped: bool,
 }
 
-pub(crate) fn new_merge_iterator<'a>(
-    x: Vec<&'a mut dyn Iterator<Item = KVRecord>>,
-) -> MergeIterator<'a> {
+pub(crate) fn new_merge_iterator(
+    x: Vec<Box<dyn Iterator<Item = Result<KVRecord, Error>>>>,
+) -> MergeIterator {
     MergeIterator {
         iters: x.into_iter().map(|x| x.peekable()).collect(),
+        stopped: false,
     }
 }
 
-impl<'a> Iterator for MergeIterator<'a> {
+impl Iterator for MergeIterator {
     type Item = KVRecord;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped {
+            return None;
+        }
         // NB:
         // Assumes that each iterator in `iters` contains
         // at most one entry for a given key, and that the
@@ -36,7 +41,14 @@ impl<'a> Iterator for MergeIterator<'a> {
         let mut min = None;
         for x in self.iters.iter_mut() {
             match x.peek() {
-                Some(kvr) => {
+                Some(Err(e)) => {
+                    self.stopped = true;
+                    return None;
+                    // immediately return the None, and
+                    // don't permit further reading.
+                    // We should store the error somewhere.
+                }
+                Some(Ok(kvr)) => {
                     min = match min {
                         None => Some(kvr.clone()),
                         Some(ref minkvr) => {
@@ -51,22 +63,27 @@ impl<'a> Iterator for MergeIterator<'a> {
                 None => {}
             }
         }
+
         // If we found a min, advance all the iters that have
         // a record with the same key (because we now have the
         // correct KVRecord to return for that key in `min`)
-        match min.as_ref() {
-            None => {}
-            Some(kvr) => {
-                let minkey = kvr.key.as_slice();
-                for x in self.iters.iter_mut() {
-                    match x.peek() {
-                        Some(kvr) => {
-                            if kvr.key.as_slice() == minkey {
-                                x.next(); // advance past this key
-                            }
-                        }
-                        None => {}
+        if let Some(kvr) = min.as_ref() {
+            let minkey = kvr.key.as_slice();
+            for x in self.iters.iter_mut() {
+                match x.peek() {
+                    Some(Err(e)) => {
+                        self.stopped = true;
+                        return None;
+                        // immediately return the None, and
+                        // don't permit further reading.
+                        // We should store the error somewhere.
                     }
+                    Some(Ok(kvr)) => {
+                        if kvr.key.as_slice() == minkey {
+                            x.next(); // advance past this key
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -110,12 +127,12 @@ mod tests_merge_iterator {
         // method to make this cleaner.
         let kvr = kv("foo", "bar");
         let expected = kvr.clone();
-        let mut sstable = vec![kvr].into_iter();
+        let sstable = vec![Ok(kvr)].into_iter();
         // Let's read this type for our own edification:
         // A vector containing mutable references to sstables, which
         // we have to cast to mutable references to types that implement
         // this Iterator trait over KVRecord items.
-        let iters = vec![&mut sstable as &mut dyn Iterator<Item = KVRecord>];
+        let iters = vec![Box::new(sstable) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>];
         let mut mt = new_merge_iterator(iters);
         assert_eq!(mt.next(), Some(expected));
         Ok(())
@@ -123,11 +140,11 @@ mod tests_merge_iterator {
 
     #[test]
     fn test_merge_two_unique_vecs() -> Result<(), Error> {
-        let mut sstable1 = vec![kv("aaaa", "barA"), kv("cccc", "barC")].into_iter();
-        let mut sstable2 = vec![kv("bbbb", "barB"), kv("dddd", "barD")].into_iter();
+        let sstable1 = vec![Ok(kv("aaaa", "barA")), Ok(kv("cccc", "barC"))].into_iter();
+        let sstable2 = vec![Ok(kv("bbbb", "barB")), Ok(kv("dddd", "barD"))].into_iter();
         let iters = vec![
-            &mut sstable1 as &mut dyn Iterator<Item = KVRecord>,
-            &mut sstable2 as &mut dyn Iterator<Item = KVRecord>,
+            Box::new(sstable1) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
+            Box::new(sstable2) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
         ];
         let mut mt = new_merge_iterator(iters);
         assert_eq!(mt.next(), Some(kv("aaaa", "barA")));
@@ -138,21 +155,50 @@ mod tests_merge_iterator {
     }
     #[test]
     fn test_merge_two_duplicate_key_vecs() -> Result<(), Error> {
-        let mut sstable1 = vec![kv("aaaa", "barA"), kv("cccc", "barC")].into_iter();
-        let mut sstable2 = vec![
-            kv("aaaa", "barABAD"),
-            kv("cccc", "barCBAD"),
-            kv("dddd", "barD"),
+        let sstable1 = vec![Ok(kv("aaaa", "barA")), Ok(kv("cccc", "barC"))].into_iter();
+        let sstable2 = vec![
+            Ok(kv("aaaa", "barABAD")),
+            Ok(kv("cccc", "barCBAD")),
+            Ok(kv("dddd", "barD")),
         ]
         .into_iter();
         let iters = vec![
-            &mut sstable1 as &mut dyn Iterator<Item = KVRecord>,
-            &mut sstable2 as &mut dyn Iterator<Item = KVRecord>,
+            Box::new(sstable1) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
+            Box::new(sstable2) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
         ];
         let mut mt = new_merge_iterator(iters);
         assert_eq!(mt.next(), Some(kv("aaaa", "barA")));
         assert_eq!(mt.next(), Some(kv("cccc", "barC")));
         assert_eq!(mt.next(), Some(kv("dddd", "barD")));
+        Ok(())
+    }
+    #[test]
+    fn test_error_stops_iter() -> Result<(), Error> {
+        let sstable1 = vec![
+            Ok(kv("aaaa", "barA")),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "oh no!",
+            )),
+            Ok(kv("cccc", "barC")),
+        ]
+        .into_iter();
+        let sstable2 = vec![
+            Ok(kv("aaaa", "barABAD")),
+            Ok(kv("cccc", "barCBAD")),
+            Ok(kv("dddd", "barD")),
+        ]
+        .into_iter();
+        let iters = vec![
+            Box::new(sstable1) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
+            Box::new(sstable2) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
+        ];
+        let mut mt = new_merge_iterator(iters);
+        assert_eq!(mt.next(), Some(kv("aaaa", "barA")));
+        assert_eq!(mt.next(), None);
+        assert_eq!(mt.next(), None);
+        assert_eq!(mt.next(), None);
+        assert_eq!(mt.next(), None);
         Ok(())
     }
 }

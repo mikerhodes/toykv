@@ -286,11 +286,12 @@ mod tests_writer {
 /// Reader for single SSTable file on disk
 struct SSTableFileReader {
     f: BufReader<File>,
+    p: PathBuf,
 }
 fn new_file_reader(path: PathBuf) -> Result<SSTableFileReader, Error> {
-    let f = OpenOptions::new().read(true).open(path)?;
+    let f = OpenOptions::new().read(true).open(&path)?;
     let br = BufReader::with_capacity(256 * 1024, f);
-    Ok(SSTableFileReader { f: br })
+    Ok(SSTableFileReader { f: br, p: path })
 }
 impl SSTableFileReader {
     /// Search this SSTable file for a key.
@@ -321,6 +322,10 @@ impl SSTableFileReader {
     fn reset(&mut self) -> Result<(), Error> {
         self.f.seek(SeekFrom::Start(0))?;
         Ok(())
+    }
+
+    fn duplicate(&self) -> SSTableFileReader {
+        new_file_reader(self.p.clone()).unwrap()
     }
 }
 
@@ -387,9 +392,9 @@ impl SSTablesReader {
         // might get us started more quickly.
         // merge_iterator::new_merge_iterator(vec![])
         let mut vec = vec![];
-        for t in self.tables.as_slice() {
-            let mut i = (&t).filter(|x| x.is_ok()).map(|x| x.unwrap())
-            vec.push(&mut i as (&mut dyn Iterator<Item = KVRecord>));
+        for t in &self.tables {
+            vec.push(Box::new(t.duplicate())
+                as Box<dyn Iterator<Item = Result<KVRecord, std::io::Error>>>);
         }
         merge_iterator::new_merge_iterator(vec)
     }
