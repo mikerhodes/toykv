@@ -2,6 +2,23 @@ use std::{io::Error, iter::Peekable};
 
 use crate::kvrecord::KVRecord;
 
+// Define our error types. These may be customized for our error handling cases.
+// Now we will be able to write our own errors, defer to an underlying error
+// implementation, or do something in between.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeIteratorError;
+
+// Generation of an error is completely separate from how it is displayed.
+// There's no need to be concerned about cluttering complex logic with the display style.
+//
+// Note that we don't store any extra info about the errors. This means we can't state
+// which string failed to parse without modifying our types to carry that information.
+// impl fmt::Display for DoubleError {
+//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//         write!(f, "invalid first item to double")
+//     }
+// }
+
 /// MergeIterator takes a vec of child iterators over KVRecord and
 /// emits the KVRecords from all child iterators, ordered by key. It
 /// assumes the child iterators are ordered by key. If multiple child
@@ -23,7 +40,7 @@ pub(crate) fn new_merge_iterator(
 }
 
 impl Iterator for MergeIterator {
-    type Item = KVRecord;
+    type Item = Result<KVRecord, MergeIteratorError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped {
@@ -38,26 +55,24 @@ impl Iterator for MergeIterator {
         // at every iterator's next value. Will naturally leave
         // `min` at None and end this iterator when the child
         // iters are exhausted.
-        let mut min = None;
+        let mut min: Option<Self::Item> = None;
         for x in self.iters.iter_mut() {
             match x.peek() {
                 Some(Err(e)) => {
                     self.stopped = true;
-                    return None;
-                    // immediately return the None, and
-                    // don't permit further reading.
-                    // We should store the error somewhere.
+                    return Some(Err(MergeIteratorError {}));
                 }
                 Some(Ok(kvr)) => {
                     min = match min {
-                        None => Some(kvr.clone()),
-                        Some(ref minkvr) => {
+                        None => Some(Ok(kvr.clone())),
+                        Some(Ok(ref minkvr)) => {
                             if kvr.key < minkvr.key {
-                                Some(kvr.clone())
+                                Some(Ok(kvr.clone()))
                             } else {
                                 min
                             }
                         }
+                        Some(Err(e)) => Some(Err(e)),
                     }
                 }
                 None => {}
@@ -67,17 +82,11 @@ impl Iterator for MergeIterator {
         // If we found a min, advance all the iters that have
         // a record with the same key (because we now have the
         // correct KVRecord to return for that key in `min`)
-        if let Some(kvr) = min.as_ref() {
+        if let Some(Ok(kvr)) = min.as_ref() {
             let minkey = kvr.key.as_slice();
             for x in self.iters.iter_mut() {
                 match x.peek() {
-                    Some(Err(e)) => {
-                        self.stopped = true;
-                        return None;
-                        // immediately return the None, and
-                        // don't permit further reading.
-                        // We should store the error somewhere.
-                    }
+                    Some(Err(_e)) => {}
                     Some(Ok(kvr)) => {
                         if kvr.key.as_slice() == minkey {
                             x.next(); // advance past this key
@@ -134,7 +143,7 @@ mod tests_merge_iterator {
         // this Iterator trait over KVRecord items.
         let iters = vec![Box::new(sstable) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>];
         let mut mt = new_merge_iterator(iters);
-        assert_eq!(mt.next(), Some(expected));
+        assert_eq!(mt.next(), Some(Ok(expected)));
         Ok(())
     }
 
@@ -147,10 +156,10 @@ mod tests_merge_iterator {
             Box::new(sstable2) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
         ];
         let mut mt = new_merge_iterator(iters);
-        assert_eq!(mt.next(), Some(kv("aaaa", "barA")));
-        assert_eq!(mt.next(), Some(kv("bbbb", "barB")));
-        assert_eq!(mt.next(), Some(kv("cccc", "barC")));
-        assert_eq!(mt.next(), Some(kv("dddd", "barD")));
+        assert_eq!(mt.next(), Some(Ok(kv("aaaa", "barA"))));
+        assert_eq!(mt.next(), Some(Ok(kv("bbbb", "barB"))));
+        assert_eq!(mt.next(), Some(Ok(kv("cccc", "barC"))));
+        assert_eq!(mt.next(), Some(Ok(kv("dddd", "barD"))));
         Ok(())
     }
     #[test]
@@ -167,9 +176,9 @@ mod tests_merge_iterator {
             Box::new(sstable2) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
         ];
         let mut mt = new_merge_iterator(iters);
-        assert_eq!(mt.next(), Some(kv("aaaa", "barA")));
-        assert_eq!(mt.next(), Some(kv("cccc", "barC")));
-        assert_eq!(mt.next(), Some(kv("dddd", "barD")));
+        assert_eq!(mt.next(), Some(Ok(kv("aaaa", "barA"))));
+        assert_eq!(mt.next(), Some(Ok(kv("cccc", "barC"))));
+        assert_eq!(mt.next(), Some(Ok(kv("dddd", "barD"))));
         Ok(())
     }
     #[test]
@@ -194,7 +203,8 @@ mod tests_merge_iterator {
             Box::new(sstable2) as Box<dyn Iterator<Item = Result<KVRecord, Error>>>,
         ];
         let mut mt = new_merge_iterator(iters);
-        assert_eq!(mt.next(), Some(kv("aaaa", "barA")));
+        assert_eq!(mt.next(), Some(Ok(kv("aaaa", "barA"))));
+        assert!(matches!(mt.next(), Some(Err(_e))));
         assert_eq!(mt.next(), None);
         assert_eq!(mt.next(), None);
         assert_eq!(mt.next(), None);

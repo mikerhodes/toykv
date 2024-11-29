@@ -485,9 +485,9 @@ mod tests_reader {
 
         let mut r = new_reader(tmp_dir.path())?;
         let mut records = r.scan();
-        assert_eq!(records.next(), Some(kv(&[1, 2, 3], &[6, 7, 8, 9])));
-        assert_eq!(records.next(), Some(kv(&[23, 24], &[100, 122, 4])));
-        assert_eq!(records.next(), Some(kv(&[66, 23, 24], &[100, 122, 4])));
+        assert_eq!(records.next(), Some(Ok(kv(&[1, 2, 3], &[6, 7, 8, 9]))));
+        assert_eq!(records.next(), Some(Ok(kv(&[23, 24], &[100, 122, 4]))));
+        assert_eq!(records.next(), Some(Ok(kv(&[66, 23, 24], &[100, 122, 4]))));
         assert_eq!(records.next(), None);
 
         Ok(())
