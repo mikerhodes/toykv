@@ -1,7 +1,8 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, io::Error, path::Path};
 
 use kvrecord::KVValue;
-use sstable::SSTables;
+use merge_iterator::{MergeIterator, MergeIteratorError};
+use sstable::{SSTableFileReader, SSTables};
 use wal::WAL;
 
 mod kvrecord;
@@ -153,4 +154,43 @@ impl ToyKV {
 
     // /// Immediately terminate (for use during testing, "pretend to crash")
     // pub(crate) fn terminate(&mut self) {}
+
+    // TODO here KVRecord can have a deleted value, so need to separate out
+    // a "public" record type. Might want to figure out the error story too.
+    pub fn scan(&mut self) -> KVIterator {
+        let sstables = self.sstables.iters();
+        KVIterator {
+            i: merge_iterator::new_merge_iterator(sstables),
+        }
+    }
+}
+
+pub struct KV {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+pub struct KVIterator {
+    i: MergeIterator<SSTableFileReader>,
+}
+
+impl Iterator for KVIterator {
+    type Item = Result<KV, MergeIteratorError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // This is an external API, so skip deleted items.
+        loop {
+            match self.i.next() {
+                None => return None,
+                Some(Err(e)) => return Some(Err(e)),
+                Some(Ok(kvr)) if kvr.value == KVValue::Deleted => continue,
+                Some(Ok(kvr)) => {
+                    return Some(Ok(KV {
+                        key: kvr.key,
+                        value: vec![],
+                    }))
+                }
+            }
+        }
+    }
 }

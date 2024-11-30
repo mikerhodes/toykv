@@ -81,6 +81,14 @@ impl SSTables {
     pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
         self.sstables.get(k)
     }
+
+    pub(crate) fn iters(&mut self) -> Vec<SSTableFileReader> {
+        let mut vec = vec![];
+        for t in &self.sstables.tables {
+            vec.push(t.duplicate());
+        }
+        vec
+    }
 }
 
 /// Return the SSTables in dir, ordered newest to oldest.
@@ -284,7 +292,7 @@ mod tests_writer {
 }
 
 /// Reader for single SSTable file on disk
-struct SSTableFileReader {
+pub(crate) struct SSTableFileReader {
     f: BufReader<File>,
     p: PathBuf,
 }
