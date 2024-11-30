@@ -383,18 +383,10 @@ impl SSTablesReader {
         Ok(None)
     }
 
-    fn scan(&mut self) -> MergeIterator {
-        // We could create a set of new SSTableFileReader
-        // iterators for this, but probably we want to figure
-        // out what borrowing looks like, because otherwise
-        // we have to create new file handles on our files,
-        // which seems a bit pointless. But even if pointless
-        // might get us started more quickly.
-        // merge_iterator::new_merge_iterator(vec![])
+    fn scan(&mut self) -> MergeIterator<SSTableFileReader> {
         let mut vec = vec![];
         for t in &self.tables {
-            vec.push(Box::new(t.duplicate())
-                as Box<dyn Iterator<Item = Result<KVRecord, std::io::Error>>>);
+            vec.push(t.duplicate());
         }
         merge_iterator::new_merge_iterator(vec)
     }
