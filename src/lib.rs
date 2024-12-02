@@ -1,31 +1,16 @@
-use std::{collections::BTreeMap, io::Error, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
+use error::ToyKVError;
 use kvrecord::KVValue;
-use merge_iterator::{MergeIterator, MergeIteratorError};
+use merge_iterator::MergeIterator;
 use sstable::{SSTableFileReader, SSTables};
 use wal::WAL;
 
+pub mod error;
 mod kvrecord;
 mod merge_iterator;
 mod sstable;
 mod wal;
-
-#[derive(Debug)]
-pub enum ToyKVError {
-    GenericError,
-    DataDirMissing,
-    FileError(std::io::Error),
-    BadWALState,
-    BadWALSeq { expected: u32, actual: u32 },
-    KeyTooLarge,
-    ValueTooLarge,
-}
-
-impl From<std::io::Error> for ToyKVError {
-    fn from(value: std::io::Error) -> Self {
-        ToyKVError::FileError(value)
-    }
-}
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum WALSync {
@@ -175,7 +160,7 @@ pub struct KVIterator {
 }
 
 impl Iterator for KVIterator {
-    type Item = Result<KV, MergeIteratorError>;
+    type Item = Result<KV, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // This is an external API, so skip deleted items.

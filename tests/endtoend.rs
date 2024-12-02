@@ -1,4 +1,4 @@
-use toykv::{ToyKVError, WALSync};
+use toykv::{error::ToyKVError, WALSync};
 
 #[test]
 fn insert_and_readback() -> Result<(), ToyKVError> {

@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use toykv::ToyKVError;
+use toykv::error::ToyKVError;
 
 fn main() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();

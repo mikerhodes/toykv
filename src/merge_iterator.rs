@@ -1,12 +1,6 @@
 use std::{io::Error, iter::Peekable};
 
-use crate::kvrecord::KVRecord;
-
-// Define our error types. These may be customized for our error handling cases.
-// Now we will be able to write our own errors, defer to an underlying error
-// implementation, or do something in between.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MergeIteratorError;
+use crate::{error::ToyKVError, kvrecord::KVRecord};
 
 // Generation of an error is completely separate from how it is displayed.
 // There's no need to be concerned about cluttering complex logic with the display style.
@@ -43,7 +37,7 @@ impl<I> Iterator for MergeIterator<I>
 where
     I: Iterator<Item = Result<KVRecord, Error>>,
 {
-    type Item = Result<KVRecord, MergeIteratorError>;
+    type Item = Result<KVRecord, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped {
@@ -59,11 +53,13 @@ where
         // `min` at None and end this iterator when the child
         // iters are exhausted.
         let mut min: Option<Self::Item> = None;
+        // TODO chain() can be used when we have memtables iter too
+        //      maybe with once() if we just have the one memtable.
         for x in self.sstables.iter_mut() {
             match x.peek() {
                 Some(Err(e)) => {
                     self.stopped = true;
-                    return Some(Err(MergeIteratorError {}));
+                    return Some(Err(ToyKVError::from(e)));
                 }
                 Some(Ok(kvr)) => {
                     min = match min {
