@@ -7,6 +7,7 @@ pub enum ToyKVError {
     BadWALSeq { expected: u32, actual: u32 },
     KeyTooLarge,
     ValueTooLarge,
+    DatabaseShutdown,
 }
 
 impl From<&std::io::Error> for ToyKVError {

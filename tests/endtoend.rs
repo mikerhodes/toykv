@@ -159,3 +159,124 @@ fn deletes() -> Result<(), ToyKVError> {
 
     Ok(())
 }
+
+#[test]
+fn operations_blocked_after_shutdown() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    let writes = 2500i64;
+
+    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+
+    for n in 1..(writes + 1) {
+        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
+    }
+
+    let mut cnt = 0;
+    for _ in db.scan() {
+        cnt += 1;
+    }
+    assert_eq!(cnt, writes);
+
+    db.shutdown();
+
+    // TODO should be an error
+    assert!(matches!(
+        db.get(1_i64.to_be_bytes().to_vec()),
+        Err(ToyKVError::DatabaseShutdown)
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn scan() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    let writes = 2500i64;
+
+    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+
+    for n in 1..(writes + 1) {
+        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
+    }
+
+    let mut cnt = 0;
+    for _ in db.scan() {
+        cnt += 1;
+    }
+    assert_eq!(cnt, writes);
+
+    db.shutdown();
+
+    Ok(())
+}
+
+#[test]
+fn scan_on_reopen() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    let writes = 2500i64;
+
+    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+
+    for n in 1..(writes + 1) {
+        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
+    }
+
+    db.shutdown();
+
+    let mut db2 = toykv::open(tmp_dir.path())?;
+    let mut cnt = 0;
+    for _ in db2.scan() {
+        cnt += 1;
+    }
+    assert_eq!(cnt, writes);
+
+    Ok(())
+}
+
+#[test]
+fn scan_with_deletes() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    let writes = 2500i64;
+
+    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+
+    for n in 1..=writes {
+        db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec())?
+    }
+
+    for n in 1..=writes {
+        if n % 2 == 0 {
+            db.delete(n.to_be_bytes().to_vec())?
+        }
+    }
+
+    let mut cnt = 0;
+    for _ in db.scan() {
+        cnt += 1;
+    }
+    assert_eq!(cnt, writes / 2);
+
+    db.shutdown();
+
+    let mut db2 = toykv::open(tmp_dir.path())?;
+    cnt = 0;
+    for _ in db2.scan() {
+        cnt += 1;
+    }
+    assert_eq!(cnt, writes / 2);
+
+    Ok(())
+}
