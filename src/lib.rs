@@ -143,9 +143,16 @@ impl ToyKV {
     // TODO here KVRecord can have a deleted value, so need to separate out
     // a "public" record type. Might want to figure out the error story too.
     pub fn scan(&mut self) -> KVIterator {
+        // TODO I wonder if we want to have this be a borrow of the memtable
+        // iterator then we need to have a lifetime on the ToyKV so we can
+        // guarantee the lifespan of the memtable.
+        // Also we have an issue here that the iterator interface allows
+        // someone to grab the iterator and then issue a write, and
+        // mess things up.
+        let memtables = vec![self.memtable.into_iter()];
         let sstables = self.sstables.iters();
         KVIterator {
-            i: merge_iterator::new_merge_iterator(sstables),
+            i: merge_iterator::new_merge_iterator(memtables, sstables),
         }
     }
 }
