@@ -1,9 +1,9 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, io::Error, path::Path};
 
 use error::ToyKVError;
-use kvrecord::KVValue;
+use kvrecord::{KVRecord, KVValue};
 use merge_iterator::MergeIterator;
-use sstable::{SSTableFileReader, SSTables};
+use sstable::SSTables;
 use wal::WAL;
 
 pub mod error;
@@ -140,13 +140,27 @@ impl ToyKV {
     // /// Immediately terminate (for use during testing, "pretend to crash")
     // pub(crate) fn terminate(&mut self) {}
 
-    // TODO here KVRecord can have a deleted value, so need to separate out
-    // a "public" record type. Might want to figure out the error story too.
     pub fn scan(&mut self) -> KVIterator {
-        let sstables = self.sstables.iters();
-        KVIterator {
-            i: merge_iterator::new_merge_iterator(sstables),
+        let mut m = MergeIterator::new();
+        // TODO need to figure out all the lifetimes in the
+        // store, such that we can borrow memtable here ---
+        // the ToyKV would need a lifetime and everything would
+        // have to use that lifetime such that the compiler can
+        // check the ToyKV lives beyond everything!
+        m.add_iterator(self.memtable.clone().into_iter().map(
+            |(key, value)| -> Result<KVRecord, Error> {
+                Ok(KVRecord {
+                    key: key.clone(),     // or key.to_owned()
+                    value: value.clone(), // assuming KVValue implements Clone
+                })
+            },
+        ));
+        // TODO we're also cloning file-handles here but that's
+        // a bit better than the whole memtable!!
+        for t in self.sstables.iters() {
+            m.add_iterator(t);
         }
+        KVIterator { i: m }
     }
 }
 
@@ -156,7 +170,7 @@ pub struct KV {
 }
 
 pub struct KVIterator {
-    i: MergeIterator<SSTableFileReader>,
+    i: MergeIterator,
 }
 
 impl Iterator for KVIterator {
