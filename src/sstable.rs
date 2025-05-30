@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     kvrecord::{KVRecord, KVWriteRecord, KVWriteValue},
-    merge_iterator::{self, MergeIterator},
+    merge_iterator::MergeIterator,
     KVValue,
 };
 
@@ -391,12 +391,12 @@ impl SSTablesReader {
         Ok(None)
     }
 
-    fn scan(&mut self) -> MergeIterator<SSTableFileReader> {
-        let mut vec = vec![];
+    fn scan(&mut self) -> MergeIterator {
+        let mut m = MergeIterator::new();
         for t in &self.tables {
-            vec.push(t.duplicate());
+            m.add_iterator(t.duplicate());
         }
-        merge_iterator::new_merge_iterator(vec)
+        m
     }
 }
 #[cfg(test)]
