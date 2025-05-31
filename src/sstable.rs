@@ -46,16 +46,16 @@ pub(crate) struct SSTables {
     sstables: SSTablesReader,
 }
 
-/// Create a new SSTables whose files live in the directory d.
-pub(crate) fn new_sstables(d: &Path) -> Result<SSTables, Error> {
-    let sstables = new_reader(d)?;
-    Ok(SSTables {
-        d: d.to_path_buf(),
-        sstables,
-    })
-}
-
 impl SSTables {
+    /// Create a new SSTables whose files live in the directory d.
+    pub(crate) fn new(d: &Path) -> Result<SSTables, Error> {
+        let sstables = SSTablesReader::new(d)?;
+        Ok(SSTables {
+            d: d.to_path_buf(),
+            sstables,
+        })
+    }
+
     /// Write a new SSTable to the set managed by this
     /// SSTables. After this method returns, the contents
     /// of the memtable are durable on disk and are used
@@ -64,7 +64,7 @@ impl SSTables {
         &mut self,
         memtable: &BTreeMap<Vec<u8>, KVValue>,
     ) -> Result<(), Error> {
-        let mut sst = new_writer(self.d.as_path())?;
+        let mut sst = SSTableFileWriter::new(self.d.as_path())?;
         for entry in memtable {
             sst.write(entry.0, entry.1.into())?;
         }
@@ -72,7 +72,7 @@ impl SSTables {
 
         // Need a new reader to regenerate the file list to
         // read from.
-        self.sstables = new_reader(self.d.as_path())?;
+        self.sstables = SSTablesReader::new(self.d.as_path())?;
         Ok(())
     }
 
@@ -196,49 +196,49 @@ struct SSTableFileWriter {
     f: File,
     start: Instant,
 }
-/// Start writing a new immutable file in the dir path.
-fn new_writer(dir: &Path) -> Result<SSTableFileWriter, Error> {
-    // So basically here we have to read 00000001.data etc and find the
-    // greatest number we have so far, then create a path that is inc that
-    // number by one.
-
-    let entries = sorted_sstable_files(dir)?;
-
-    // If we've no files, then make our first file.
-    // Otherwise, parse the file_stem into an int (lots of unwrap as we
-    // know the filename has a step and it parses to the uint from the
-    // filters above).
-    // Check it's not max, if so return error.
-    // Add 1 to it.
-    // Make the filename
-    let path = match entries.first() {
-        None => dir.join(format!("{:010}.data", 1)),
-        Some(e) => {
-            let path = e.path();
-            let stem = path.file_stem().unwrap();
-            let n = stem.to_string_lossy().parse::<u32>().unwrap();
-            if n >= u32::MAX - 1 {
-                panic!("Run out of SSTable numbers!");
-            }
-            dir.join(format!("{:010}.data", n + 1))
-        }
-    };
-
-    println!("[new_writer] opening new SSTable at: {:?}", path);
-
-    // Open that file, and stick it in the SSTableFileWriter.
-    let f = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(path.as_path())?;
-
-    Ok(SSTableFileWriter {
-        f,
-        p: path.to_path_buf(),
-        start: Instant::now(),
-    })
-}
 impl SSTableFileWriter {
+    /// Start writing a new immutable file in the dir path.
+    fn new(dir: &Path) -> Result<SSTableFileWriter, Error> {
+        // So basically here we have to read 00000001.data etc and find the
+        // greatest number we have so far, then create a path that is inc that
+        // number by one.
+
+        let entries = sorted_sstable_files(dir)?;
+
+        // If we've no files, then make our first file.
+        // Otherwise, parse the file_stem into an int (lots of unwrap as we
+        // know the filename has a step and it parses to the uint from the
+        // filters above).
+        // Check it's not max, if so return error.
+        // Add 1 to it.
+        // Make the filename
+        let path = match entries.first() {
+            None => dir.join(format!("{:010}.data", 1)),
+            Some(e) => {
+                let path = e.path();
+                let stem = path.file_stem().unwrap();
+                let n = stem.to_string_lossy().parse::<u32>().unwrap();
+                if n >= u32::MAX - 1 {
+                    panic!("Run out of SSTable numbers!");
+                }
+                dir.join(format!("{:010}.data", n + 1))
+            }
+        };
+
+        println!("[new_writer] opening new SSTable at: {:?}", path);
+
+        // Open that file, and stick it in the SSTableFileWriter.
+        let f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(path.as_path())?;
+
+        Ok(SSTableFileWriter {
+            f,
+            p: path.to_path_buf(),
+            start: Instant::now(),
+        })
+    }
     /// Write a key/value pair to the SSTable.
     /// It is assumed that successive calls to write will always use
     /// increasing keys; that is, SSTableFileWriter does not sort keys
@@ -273,19 +273,19 @@ mod tests_writer {
     #[test]
     fn test_write_sstable() -> Result<(), Error> {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let mut w = new_writer(tmp_dir.path())?;
+        let mut w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000001.data"));
         w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[1, 2, 3, 4]))?;
         w.finalise()?;
 
-        let w = new_writer(tmp_dir.path())?;
+        let w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000002.data"));
 
         // when we drop the previous w, an empty file should
         // end up on disk.
-        let w = new_writer(tmp_dir.path())?;
+        let w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000003.data"));
-        let w = new_writer(tmp_dir.path())?;
+        let w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000004.data"));
         Ok(())
     }
@@ -296,12 +296,13 @@ pub(crate) struct SSTableFileReader {
     f: BufReader<File>,
     p: PathBuf,
 }
-fn new_file_reader(path: PathBuf) -> Result<SSTableFileReader, Error> {
-    let f = OpenOptions::new().read(true).open(&path)?;
-    let br = BufReader::with_capacity(256 * 1024, f);
-    Ok(SSTableFileReader { f: br, p: path })
-}
 impl SSTableFileReader {
+    fn new(path: PathBuf) -> Result<SSTableFileReader, Error> {
+        let f = OpenOptions::new().read(true).open(&path)?;
+        let br = BufReader::with_capacity(256 * 1024, f);
+        Ok(SSTableFileReader { f: br, p: path })
+    }
+
     /// Search this SSTable file for a key.
     /// This advances the iterator until it finds the key,
     /// or first item greater than the key. Reset or seek
@@ -333,7 +334,7 @@ impl SSTableFileReader {
     }
 
     fn duplicate(&self) -> SSTableFileReader {
-        new_file_reader(self.p.clone()).unwrap()
+        SSTableFileReader::new(self.p.clone()).unwrap()
     }
 }
 
@@ -363,18 +364,18 @@ struct SSTablesReader {
     tables: Vec<SSTableFileReader>,
 }
 
-/// Create a new SSTableFileReader that is able to search
-/// for keys in the set of SSTables managed within a folder.
-fn new_reader(dir: &Path) -> Result<SSTablesReader, Error> {
-    let files = sorted_sstable_files(dir)?;
-    let mut tables: Vec<SSTableFileReader> = vec![];
-    for p in files {
-        tables.push(new_file_reader(p.path())?);
-    }
-    Ok(SSTablesReader { tables })
-}
-
 impl SSTablesReader {
+    /// Create a new SSTableFileReader that is able to search
+    /// for keys in the set of SSTables managed within a folder.
+    fn new(dir: &Path) -> Result<SSTablesReader, Error> {
+        let files = sorted_sstable_files(dir)?;
+        let mut tables: Vec<SSTableFileReader> = vec![];
+        for p in files {
+            tables.push(SSTableFileReader::new(p.path())?);
+        }
+        Ok(SSTablesReader { tables })
+    }
+
     /// Search through the SSTables available to this reader for
     /// a key. Return an Option with its value.
     fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
@@ -410,12 +411,12 @@ mod tests_reader {
     #[test]
     fn test_read_sstable() -> Result<(), Error> {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let mut w = new_writer(tmp_dir.path())?;
+        let mut w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000001.data"));
         w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[1, 2, 3, 4]))?;
         w.finalise()?;
 
-        let mut r = new_reader(tmp_dir.path())?;
+        let mut r = SSTablesReader::new(tmp_dir.path())?;
         assert_eq!(r.get(&[1, 2, 3])?.unwrap(), KVValue::Some(vec![1, 2, 3, 4]));
         assert_eq!(r.get(&[14])?, None);
 
@@ -425,27 +426,27 @@ mod tests_reader {
     #[test]
     fn test_read_sstables() -> Result<(), Error> {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let mut w = new_writer(tmp_dir.path())?;
+        let mut w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000001.data"));
         w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[1, 2, 3, 4]))?;
         w.write(&[23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
         w.write(&[66, 23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
         w.finalise()?;
 
-        let mut w = new_writer(tmp_dir.path())?;
+        let mut w = SSTableFileWriter::new(tmp_dir.path())?;
         w.write(&[23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
         w.finalise()?;
         assert_eq!(w.p, tmp_dir.path().join("0000000002.data"));
 
-        let w = new_writer(tmp_dir.path())?;
+        let w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000003.data"));
 
-        let mut w = new_writer(tmp_dir.path())?;
+        let mut w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000004.data"));
         w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[6, 7, 8, 9]))?; // set new value in newer layer
         w.finalise()?;
 
-        let mut r = new_reader(tmp_dir.path())?;
+        let mut r = SSTablesReader::new(tmp_dir.path())?;
         assert_eq!(r.get(&[1, 2, 3])?.unwrap(), KVValue::Some(vec![6, 7, 8, 9]));
         assert_eq!(r.get(&[23, 24])?.unwrap(), KVValue::Some(vec![100, 122, 4]));
         assert_eq!(r.get(&[14])?, None);
@@ -463,27 +464,27 @@ mod tests_reader {
     #[test]
     fn test_scan_sstables() -> Result<(), Error> {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let mut w = new_writer(tmp_dir.path())?;
+        let mut w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000001.data"));
         w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[1, 2, 3, 4]))?;
         w.write(&[23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
         w.write(&[66, 23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
         w.finalise()?;
 
-        let mut w = new_writer(tmp_dir.path())?;
+        let mut w = SSTableFileWriter::new(tmp_dir.path())?;
         w.write(&[23, 24], kvrecord::KVWriteValue::Some(&[100, 122, 4]))?;
         w.finalise()?;
         assert_eq!(w.p, tmp_dir.path().join("0000000002.data"));
 
-        let w = new_writer(tmp_dir.path())?;
+        let w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000003.data"));
 
-        let mut w = new_writer(tmp_dir.path())?;
+        let mut w = SSTableFileWriter::new(tmp_dir.path())?;
         assert_eq!(w.p, tmp_dir.path().join("0000000004.data"));
         w.write(&[1, 2, 3], kvrecord::KVWriteValue::Some(&[6, 7, 8, 9]))?; // set new value in newer layer
         w.finalise()?;
 
-        let mut r = new_reader(tmp_dir.path())?;
+        let mut r = SSTablesReader::new(tmp_dir.path())?;
         let mut records = r.scan();
         assert_eq!(records.next(), Some(Ok(kv(&[1, 2, 3], &[6, 7, 8, 9]))));
         assert_eq!(records.next(), Some(Ok(kv(&[23, 24], &[100, 122, 4]))));

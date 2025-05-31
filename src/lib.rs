@@ -47,7 +47,7 @@ pub fn with_sync(d: &Path, sync: WALSync) -> Result<ToyKV, ToyKVError> {
 
     let mut wal = wal::new(d, sync);
     let memtable = wal.replay()?;
-    let sstables = sstable::new_sstables(d)?;
+    let sstables = sstable::SSTables::new(d)?;
     Ok(ToyKV {
         memtable,
         wal,
