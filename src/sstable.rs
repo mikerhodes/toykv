@@ -82,7 +82,7 @@ impl SSTables {
         self.sstables.get(k)
     }
 
-    pub(crate) fn iters(&mut self) -> Vec<SSTableFileReader> {
+    pub(crate) fn iters(&self) -> Vec<SSTableFileReader> {
         let mut vec = vec![];
         for t in &self.sstables.tables {
             vec.push(t.duplicate());
