@@ -22,17 +22,18 @@ type TableIterator<'a> = Box<dyn Iterator<Item = Result<KVRecord, Error>> + 'a>;
 /// emits the KVRecords from all child iterators, ordered by key. It
 /// assumes the child iterators are ordered by key. If multiple child
 /// iterators contain KVRecords with the same key, the tie is broken
-/// by returning the KVRecord from the child iterator with the lowest
-/// index.
+/// by returning the KVRecord from the child iterator that was first
+/// added using `add_iterator`.
 pub(crate) struct MergeIterator<'a> {
-    sstables: Vec<Peekable<TableIterator<'a>>>,
+    /// lsmtables are the memtables and sstables underlying this MergeIterator
+    lsmtables: Vec<Peekable<TableIterator<'a>>>,
     stopped: bool,
 }
 
 impl<'a> MergeIterator<'a> {
     pub fn new() -> Self {
         Self {
-            sstables: Vec::new(),
+            lsmtables: Vec::new(),
             stopped: false,
         }
     }
@@ -42,7 +43,7 @@ impl<'a> MergeIterator<'a> {
         I: Iterator<Item = Result<KVRecord, Error>> + 'a,
     {
         let b: TableIterator<'a> = Box::new(iter);
-        self.sstables.push(b.peekable());
+        self.lsmtables.push(b.peekable());
     }
 }
 
@@ -65,7 +66,7 @@ impl<'a> Iterator for MergeIterator<'a> {
         let mut min: Option<Self::Item> = None;
         // TODO chain() can be used when we have memtables iter too
         //      maybe with once() if we just have the one memtable.
-        for x in self.sstables.iter_mut() {
+        for x in self.lsmtables.iter_mut() {
             match x.peek() {
                 Some(Err(e)) => {
                     self.stopped = true;
@@ -93,7 +94,7 @@ impl<'a> Iterator for MergeIterator<'a> {
         // correct KVRecord to return for that key in `min`)
         if let Some(Ok(kvr)) = min.as_ref() {
             let minkey = kvr.key.as_slice();
-            for x in self.sstables.iter_mut() {
+            for x in self.lsmtables.iter_mut() {
                 match x.peek() {
                     Some(Err(_e)) => {}
                     Some(Ok(kvr)) => {
