@@ -16,7 +16,7 @@ use crate::{error::ToyKVError, kvrecord::KVRecord};
 /// TableIterator can iterate over either memtables or sstables (or
 /// Vecs during testing). We Box it so we can use polymorphism to
 /// loop over both memtables and sstables when scanning.
-type TableIterator = Box<dyn Iterator<Item = Result<KVRecord, Error>>>;
+type TableIterator<'a> = Box<dyn Iterator<Item = Result<KVRecord, Error>> + 'a>;
 
 /// MergeIterator takes a vec of child iterators over KVRecord and
 /// emits the KVRecords from all child iterators, ordered by key. It
@@ -24,12 +24,12 @@ type TableIterator = Box<dyn Iterator<Item = Result<KVRecord, Error>>>;
 /// iterators contain KVRecords with the same key, the tie is broken
 /// by returning the KVRecord from the child iterator with the lowest
 /// index.
-pub(crate) struct MergeIterator {
-    sstables: Vec<Peekable<TableIterator>>,
+pub(crate) struct MergeIterator<'a> {
+    sstables: Vec<Peekable<TableIterator<'a>>>,
     stopped: bool,
 }
 
-impl MergeIterator {
+impl<'a> MergeIterator<'a> {
     pub fn new() -> Self {
         Self {
             sstables: Vec::new(),
@@ -39,14 +39,14 @@ impl MergeIterator {
 
     pub fn add_iterator<I>(&mut self, iter: I)
     where
-        I: Iterator<Item = Result<KVRecord, Error>> + 'static,
+        I: Iterator<Item = Result<KVRecord, Error>> + 'a,
     {
-        let b: TableIterator = Box::new(iter);
+        let b: TableIterator<'a> = Box::new(iter);
         self.sstables.push(b.peekable());
     }
 }
 
-impl Iterator for MergeIterator {
+impl<'a> Iterator for MergeIterator<'a> {
     type Item = Result<KVRecord, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {

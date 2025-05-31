@@ -140,21 +140,18 @@ impl ToyKV {
     // /// Immediately terminate (for use during testing, "pretend to crash")
     // pub(crate) fn terminate(&mut self) {}
 
-    pub fn scan(&mut self) -> KVIterator {
-        let mut m = MergeIterator::new();
-        // TODO need to figure out all the lifetimes in the
-        // store, such that we can borrow memtable here ---
-        // the ToyKV would need a lifetime and everything would
-        // have to use that lifetime such that the compiler can
-        // check the ToyKV lives beyond everything!
-        m.add_iterator(self.memtable.clone().into_iter().map(
-            |(key, value)| -> Result<KVRecord, Error> {
-                Ok(KVRecord {
-                    key: key.clone(),     // or key.to_owned()
-                    value: value.clone(), // assuming KVValue implements Clone
-                })
-            },
-        ));
+    pub fn scan<'a>(&'a self) -> KVIterator<'a> {
+        let mut m = MergeIterator::<'a>::new();
+        m.add_iterator(
+            self.memtable
+                .iter()
+                .map(|(key, value)| -> Result<KVRecord, Error> {
+                    Ok(KVRecord {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                }),
+        );
         // TODO we're also cloning file-handles here but that's
         // a bit better than the whole memtable!!
         for t in self.sstables.iters() {
@@ -169,11 +166,11 @@ pub struct KV {
     pub value: Vec<u8>,
 }
 
-pub struct KVIterator {
-    i: MergeIterator,
+pub struct KVIterator<'a> {
+    i: MergeIterator<'a>,
 }
 
-impl Iterator for KVIterator {
+impl<'a> Iterator for KVIterator<'a> {
     type Item = Result<KV, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {
