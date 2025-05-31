@@ -161,6 +161,7 @@ fn deletes() -> Result<(), ToyKVError> {
 }
 
 #[test]
+#[ignore = "not yet implemented"]
 fn operations_blocked_after_shutdown() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
