@@ -152,8 +152,6 @@ impl ToyKV {
                     })
                 }),
         );
-        // TODO we're also cloning file-handles here but that's
-        // a bit better than the whole memtable!!
         for t in self.sstables.iters() {
             m.add_iterator(t);
         }
