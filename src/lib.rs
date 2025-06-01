@@ -6,6 +6,7 @@ use merge_iterator::MergeIterator;
 use sstable::SSTables;
 use wal::WAL;
 
+mod block;
 pub mod error;
 mod kvrecord;
 mod merge_iterator;
