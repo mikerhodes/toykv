@@ -23,6 +23,8 @@
 // which means their maximum lengths are 65535.
 // (Internally stored as u16)
 
+use std::io::{Cursor, Read};
+
 use crate::kvrecord::KVWriteValue;
 
 const BLOCK_SIZE: usize = 4096;
@@ -35,9 +37,7 @@ pub(crate) enum BlockBuilderError {
 
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct Entry {
-    key_len: u16,
     key: Vec<u8>,
-    value_len: u16,
     value: Vec<u8>,
 }
 
@@ -116,9 +116,63 @@ impl Block {
 }
 impl Entry {
     fn size(&self) -> usize {
-        return 2 + self.key_len as usize + 2 + self.value_len as usize;
+        return 2 + self.key.len() + 2 + self.value.len();
     }
-    fn decode(data: Vec<u8>) -> Block {}
+    fn decode(data: Vec<u8>) -> Entry {
+        let mut u16buf: [u8; 2] = [0u8; 2];
+        let mut c = Cursor::new(data);
 
-    fn encode(&self) -> Vec<u8> {}
+        assert!(matches!(c.read(&mut u16buf), Ok(2)));
+        let keylen = u16::from_be_bytes(u16buf);
+        let mut key = vec![0; keylen as usize];
+        assert!(matches!(c.read(&mut key), Ok(n) if n == keylen as usize));
+
+        assert!(matches!(c.read(&mut u16buf), Ok(2)));
+        let valuelen = u16::from_be_bytes(u16buf);
+        let mut value = vec![0; valuelen as usize];
+        assert!(matches!(c.read(&mut value), Ok(n) if n == valuelen as usize));
+
+        Entry { key, value }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut buf: Vec<u8> = vec![];
+
+        buf.extend((self.key.len() as u16).to_be_bytes());
+        buf.extend(self.key.clone());
+        buf.extend((self.value.len() as u16).to_be_bytes());
+        buf.extend(self.value.clone());
+
+        buf
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_entry_roundtrip() {
+        let original = Entry {
+            key: b"hello".to_vec(),
+            value: b"world".to_vec(),
+        };
+
+        let encoded = original.encode();
+        let decoded = Entry::decode(encoded);
+
+        assert_eq!(decoded.key, original.key);
+        assert_eq!(decoded.value, original.value);
+    }
+
+    #[test]
+    fn test_entry_size() {
+        let entry = Entry {
+            key: b"test mctestface".to_vec(),
+            value: b"data".to_vec(),
+        };
+
+        assert_eq!(entry.size(), 23); // 2 + 15 + 2 + 4
+        assert_eq!(entry.size(), entry.encode().len());
+    }
 }
