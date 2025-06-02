@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Crib the block format from
 // https://skyzh.github.io/mini-lsm/week1-03-block.html.
 // These blocks are later formed into sstables.
