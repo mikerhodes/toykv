@@ -44,26 +44,31 @@ pub(crate) struct Entry {
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct Block {
     data: Vec<u8>, // A vec of raw Entry data, at offsets
-    offsets: Vec<u8>,
+    offsets: Vec<u16>,
 }
 
 pub(crate) struct BlockBuilder {
-    entries: Vec<Entry>,
-    current_size: usize,
+    // serialised entries
+    entry_data: Vec<u8>,
+    // offsets of entries into entries
+    offsets: Vec<u16>,
 }
 
 impl BlockBuilder {
     fn new() -> BlockBuilder {
         BlockBuilder {
-            entries: vec![],
-            current_size: 0,
+            entry_data: vec![],
+            offsets: vec![],
         }
     }
 
     /// Returns true if k/v successfully added to the block, or
     /// false if the block is full.
     fn add(&mut self, key: &[u8], value: KVWriteValue) -> Result<(), BlockBuilderError> {
-        // Ensure the below unwraps will succeed
+        // Make sure we don't make it too big by accident.
+        assert!(BLOCK_SIZE < u16::MAX as usize);
+
+        // Ensure key and value sizes fit in the u16 we store them as
         if key.len() > u16::MAX as usize {
             return Err(BlockBuilderError::KeyTooLarge);
         }
@@ -73,47 +78,49 @@ impl BlockBuilder {
             }
         }
 
-        // TODO instead of having the Vec<Entry> we could
-        // encode the entry directly here and have the builder
-        // be maintaining a Vec<u8> of the data and a Vec<u16>
-        // of offsets, such that making the block at the end
-        // is trivial.
-
         let e = Entry {
-            key_len: u16::try_from(key.len()).unwrap(),
             key: key.to_vec(),
-            value_len: match value {
-                KVWriteValue::Some(x) => u16::try_from(x.len()).unwrap(),
-                KVWriteValue::Deleted => 0,
-            },
             value: match value {
                 KVWriteValue::Some(x) => x.to_vec(),
                 KVWriteValue::Deleted => vec![],
             },
         };
 
-        if self.entries.len() > 0 && self.current_size + e.size() > BLOCK_SIZE {
+        // If it is our first entry, we can go over the BLOCK_SIZE, as
+        // otherwise we couldn't store the block.
+        if self.entry_data.len() > 0 && self.entry_data.len() + e.size() > BLOCK_SIZE {
             return Err(BlockBuilderError::BlockFull);
         }
-
-        self.current_size += e.size();
-        self.entries.push(e);
+        // entry_data.len() must fit into u16 --- because it must be
+        // less than BLOCK_SIZE, which we assert is < u16::MAX.
+        self.offsets.push(self.entry_data.len() as u16);
+        self.entry_data.extend(e.encode());
 
         Ok(())
     }
 }
 
 impl Block {
-    fn decode(data: Vec<u8>) -> Block {}
+    // fn decode(data: Vec<u8>) -> Block {}
 
     /// Encode to a byte vector. This may be longer or shorter than
     /// the BLOCK_SIZE, as large k/v pairs will create large blocks,
     /// while smaller k/v pairs will end up with some slack space
     /// (that we don't pad).
-    /// The sstable file maintains an index of blocks in its metadata
-    /// to account for this variability.
-    fn encode(&self) -> Vec<u8> {}
+    /// The sstable file maintains an index of block offsets in its
+    /// metadata to account for this variability.
+    fn encode(&self) -> Vec<u8> {
+        let mut buf: Vec<u8> = vec![];
+
+        buf.extend(self.data.clone());
+        for o in &self.offsets {
+            buf.extend(o.to_be_bytes());
+        }
+
+        buf
+    }
 }
+
 impl Entry {
     fn size(&self) -> usize {
         return 2 + self.key.len() + 2 + self.value.len();
