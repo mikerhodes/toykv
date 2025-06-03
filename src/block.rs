@@ -35,25 +35,12 @@ pub(crate) enum BlockBuilderError {
     ValueTooLarge,
 }
 
-#[derive(PartialEq, Eq, Debug)]
-pub(crate) struct Entry {
-    key: Vec<u8>,
-    value: Vec<u8>,
-}
-
-#[derive(PartialEq, Eq, Debug)]
-pub(crate) struct Block {
-    data: Vec<u8>, // A vec of raw Entry data, at offsets
-    offsets: Vec<u16>,
-}
-
 pub(crate) struct BlockBuilder {
     // serialised entries
     entry_data: Vec<u8>,
     // offsets of entries into entries
     offsets: Vec<u16>,
 }
-
 impl BlockBuilder {
     fn new() -> BlockBuilder {
         BlockBuilder {
@@ -109,6 +96,11 @@ impl BlockBuilder {
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub(crate) struct Block {
+    data: Vec<u8>, // A vec of raw Entry data, at offsets
+    offsets: Vec<u16>,
+}
 impl Block {
     // fn decode(data: Vec<u8>) -> Block {}
 
@@ -130,6 +122,11 @@ impl Block {
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub(crate) struct Entry {
+    key: Vec<u8>,
+    value: Vec<u8>,
+}
 impl Entry {
     fn size(&self) -> usize {
         return 2 + self.key.len() + 2 + self.value.len();
