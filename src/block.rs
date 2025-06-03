@@ -98,6 +98,15 @@ impl BlockBuilder {
 
         Ok(())
     }
+
+    /// build returns the completed Block, consuming self in the
+    /// process.
+    fn build(self) -> Block {
+        Block {
+            data: self.entry_data,
+            offsets: self.offsets,
+        }
+    }
 }
 
 impl Block {
