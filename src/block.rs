@@ -132,7 +132,7 @@ impl Entry {
     fn size(&self) -> usize {
         return 2 + self.key.len() + 2 + self.value.len();
     }
-    fn decode(data: Vec<u8>) -> Entry {
+    fn decode(data: &[u8]) -> Entry {
         let mut u16buf: [u8; 2] = [0u8; 2];
         let mut c = Cursor::new(data);
 
@@ -173,7 +173,7 @@ mod tests {
         };
 
         let encoded = original.encode();
-        let decoded = Entry::decode(encoded);
+        let decoded = Entry::decode(&encoded);
 
         assert_eq!(decoded.key, original.key);
         assert_eq!(decoded.value, original.value);
@@ -194,7 +194,7 @@ mod tests {
     #[should_panic]
     fn test_decode_insufficient_data_for_keylen() {
         let data = vec![0u8]; // Only 1 byte, need 2 for keylen
-        Entry::decode(data);
+        Entry::decode(&data);
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod tests {
         let mut data = vec![];
         data.extend(5u16.to_be_bytes()); // Says key is 5 bytes
         data.extend(b"hi"); // But only provide 2 bytes
-        Entry::decode(data);
+        Entry::decode(&data);
     }
 
     #[test]
@@ -213,7 +213,7 @@ mod tests {
         data.extend(2u16.to_be_bytes()); // Key length
         data.extend(b"hi"); // Key data
         data.push(0u8); // Only 1 byte for value length, need 2
-        Entry::decode(data);
+        Entry::decode(&data);
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod tests {
         data.extend(b"hi"); // Key data
         data.extend(10u16.to_be_bytes()); // Says value is 10 bytes
         data.extend(b"short"); // But only provide 5 bytes
-        Entry::decode(data);
+        Entry::decode(&data);
     }
 
     // BlockBuilder Tests
