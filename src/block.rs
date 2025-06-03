@@ -29,6 +29,7 @@ use crate::kvrecord::KVWriteValue;
 
 const BLOCK_SIZE: usize = 4096;
 
+#[derive(Debug, PartialEq)]
 pub(crate) enum BlockBuilderError {
     BlockFull,
     KeyTooLarge,
@@ -42,7 +43,7 @@ pub(crate) struct BlockBuilder {
     offsets: Vec<u16>,
 }
 impl BlockBuilder {
-    fn new() -> BlockBuilder {
+    pub(crate) fn new() -> BlockBuilder {
         BlockBuilder {
             entry_data: vec![],
             offsets: vec![],
@@ -51,7 +52,7 @@ impl BlockBuilder {
 
     /// Returns true if k/v successfully added to the block, or
     /// false if the block is full.
-    fn add(&mut self, key: &[u8], value: KVWriteValue) -> Result<(), BlockBuilderError> {
+    pub(crate) fn add(&mut self, key: &[u8], value: KVWriteValue) -> Result<(), BlockBuilderError> {
         // Make sure we don't make it too big by accident.
         assert!(BLOCK_SIZE < u16::MAX as usize);
 
@@ -75,7 +76,7 @@ impl BlockBuilder {
 
         // If it is our first entry, we can go over the BLOCK_SIZE, as
         // otherwise we couldn't store the block.
-        if self.entry_data.len() > 0 && self.entry_data.len() + e.size() > BLOCK_SIZE {
+        if !self.entry_data.is_empty() && self.entry_data.len() + e.size() > BLOCK_SIZE {
             return Err(BlockBuilderError::BlockFull);
         }
         // entry_data.len() must fit into u16 --- because it must be
@@ -88,7 +89,7 @@ impl BlockBuilder {
 
     /// build returns the completed Block, consuming self in the
     /// process.
-    fn build(self) -> Block {
+    pub(crate) fn build(self) -> Block {
         Block {
             data: self.entry_data,
             offsets: self.offsets,
@@ -110,7 +111,7 @@ impl Block {
     /// (that we don't pad).
     /// The sstable file maintains an index of block offsets in its
     /// metadata to account for this variability.
-    fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf: Vec<u8> = vec![];
 
         buf.extend(self.data.clone());
@@ -224,5 +225,272 @@ mod tests {
         data.extend(10u16.to_be_bytes()); // Says value is 10 bytes
         data.extend(b"short"); // But only provide 5 bytes
         Entry::decode(data);
+    }
+
+    // BlockBuilder Tests
+    #[test]
+    fn test_block_builder_new() {
+        let builder = BlockBuilder::new();
+        assert_eq!(builder.entry_data.len(), 0);
+        assert_eq!(builder.offsets.len(), 0);
+    }
+
+    #[test]
+    fn test_block_builder_empty_build() {
+        let builder = BlockBuilder::new();
+        let block = builder.build();
+        assert_eq!(block.data.len(), 0);
+        assert_eq!(block.offsets.len(), 0);
+    }
+
+    #[test]
+    fn test_block_builder_add_single_entry() {
+        let mut builder = BlockBuilder::new();
+        let result = builder.add(b"key", KVWriteValue::Some(b"value"));
+        assert!(result.is_ok());
+        
+        let block = builder.build();
+        assert_eq!(block.offsets.len(), 1);
+        assert_eq!(block.offsets[0], 0); // First entry at offset 0
+        
+        // Entry size: 2 + 3 + 2 + 5 = 12 bytes
+        assert_eq!(block.data.len(), 12);
+    }
+
+    #[test]
+    fn test_block_builder_add_multiple_entries() {
+        let mut builder = BlockBuilder::new();
+        
+        // Add first entry
+        let result1 = builder.add(b"key1", KVWriteValue::Some(b"value1"));
+        assert!(result1.is_ok());
+        
+        // Add second entry
+        let result2 = builder.add(b"key2", KVWriteValue::Some(b"value2"));
+        assert!(result2.is_ok());
+        
+        let block = builder.build();
+        assert_eq!(block.offsets.len(), 2);
+        assert_eq!(block.offsets[0], 0); // First entry at offset 0
+        assert_eq!(block.offsets[1], 13); // Second entry at offset 13 (2+4+2+6+1 from first entry)
+    }
+
+    #[test]
+    fn test_block_builder_add_deleted_value() {
+        let mut builder = BlockBuilder::new();
+        let result = builder.add(b"deleted_key", KVWriteValue::Deleted);
+        assert!(result.is_ok());
+        
+        let block = builder.build();
+        assert_eq!(block.offsets.len(), 1);
+        // Entry size: 2 + 11 + 2 + 0 = 15 bytes (deleted values have 0 length)
+        assert_eq!(block.data.len(), 15);
+    }
+
+    #[test]
+    fn test_block_builder_key_too_large() {
+        let mut builder = BlockBuilder::new();
+        let large_key = vec![b'x'; (u16::MAX as usize) + 1];
+        let result = builder.add(&large_key, KVWriteValue::Some(b"value"));
+        
+        assert!(matches!(result, Err(BlockBuilderError::KeyTooLarge)));
+    }
+
+    #[test]
+    fn test_block_builder_value_too_large() {
+        let mut builder = BlockBuilder::new();
+        let large_value = vec![b'x'; (u16::MAX as usize) + 1];
+        let result = builder.add(b"key", KVWriteValue::Some(&large_value));
+        
+        assert!(matches!(result, Err(BlockBuilderError::ValueTooLarge)));
+    }
+
+    #[test]
+    fn test_block_builder_max_size_key_and_value() {
+        let mut builder = BlockBuilder::new();
+        let max_key = vec![b'k'; u16::MAX as usize];
+        let max_value = vec![b'v'; u16::MAX as usize];
+        let result = builder.add(&max_key, KVWriteValue::Some(&max_value));
+        
+        // Should succeed with maximum sizes
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_block_builder_first_entry_can_exceed_block_size() {
+        let mut builder = BlockBuilder::new();
+        // Create an entry larger than BLOCK_SIZE
+        let large_key = vec![b'k'; 2000];
+        let large_value = vec![b'v'; 3000]; // Total entry > 4096 bytes
+        
+        let result = builder.add(&large_key, KVWriteValue::Some(&large_value));
+        assert!(result.is_ok()); // First entry should succeed even if large
+        
+        let block = builder.build();
+        assert!(block.data.len() > BLOCK_SIZE);
+    }
+
+    #[test]
+    fn test_block_builder_subsequent_entry_blocked_by_size() {
+        let mut builder = BlockBuilder::new();
+        
+        // Add a large first entry (close to BLOCK_SIZE)
+        let large_key = vec![b'k'; 2000];
+        let large_value = vec![b'v'; 2000]; // ~4000 bytes + overhead
+        let result1 = builder.add(&large_key, KVWriteValue::Some(&large_value));
+        assert!(result1.is_ok());
+        
+        // Try to add another entry that would exceed BLOCK_SIZE
+        let result2 = builder.add(b"key2", KVWriteValue::Some(b"value2"));
+        assert!(matches!(result2, Err(BlockBuilderError::BlockFull)));
+    }
+
+    #[test]
+    fn test_block_builder_fits_multiple_small_entries() {
+        let mut builder = BlockBuilder::new();
+        let mut entries_added = 0;
+        
+        // Add many small entries until we approach BLOCK_SIZE
+        for i in 0..200 {
+            let key = format!("key{:03}", i);
+            let value = format!("value{:03}", i);
+            
+            match builder.add(key.as_bytes(), KVWriteValue::Some(value.as_bytes())) {
+                Ok(()) => entries_added += 1,
+                Err(BlockBuilderError::BlockFull) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+        
+        // Should be able to add many small entries
+        assert!(entries_added > 10);
+        
+        let block = builder.build();
+        assert_eq!(block.offsets.len(), entries_added);
+        // Block size should be close to but not exceed BLOCK_SIZE (plus or minus for the last entry)
+        assert!(block.data.len() <= BLOCK_SIZE + 50); // Some tolerance for the last attempted entry
+    }
+
+    #[test]
+    fn test_block_builder_offset_tracking() {
+        let mut builder = BlockBuilder::new();
+        
+        // Add entries of known sizes
+        builder.add(b"a", KVWriteValue::Some(b"1")).unwrap(); // 2+1+2+1 = 6 bytes
+        builder.add(b"bb", KVWriteValue::Some(b"22")).unwrap(); // 2+2+2+2 = 8 bytes
+        builder.add(b"ccc", KVWriteValue::Some(b"333")).unwrap(); // 2+3+2+3 = 10 bytes
+        
+        let block = builder.build();
+        assert_eq!(block.offsets.len(), 3);
+        assert_eq!(block.offsets[0], 0);  // First entry at 0
+        assert_eq!(block.offsets[1], 6);  // Second entry at 6
+        assert_eq!(block.offsets[2], 14); // Third entry at 14 (6+8)
+    }
+
+    #[test]
+    fn test_block_builder_mixed_deleted_and_live_values() {
+        let mut builder = BlockBuilder::new();
+        
+        builder.add(b"live1", KVWriteValue::Some(b"data1")).unwrap();
+        builder.add(b"deleted1", KVWriteValue::Deleted).unwrap();
+        builder.add(b"live2", KVWriteValue::Some(b"data2")).unwrap();
+        builder.add(b"deleted2", KVWriteValue::Deleted).unwrap();
+        
+        let block = builder.build();
+        assert_eq!(block.offsets.len(), 4);
+        
+        // Verify the data was written correctly by checking total size
+        // live1: 2+5+2+5 = 14, deleted1: 2+8+2+0 = 12, live2: 2+5+2+5 = 14, deleted2: 2+8+2+0 = 12
+        assert_eq!(block.data.len(), 14 + 12 + 14 + 12);
+    }
+
+    #[test]
+    fn test_block_size_constant_sanity() {
+        // Verify our assumption that BLOCK_SIZE < u16::MAX holds
+        assert!(BLOCK_SIZE < u16::MAX as usize);
+        assert_eq!(BLOCK_SIZE, 4096);
+    }
+
+    #[test]
+    fn test_block_builder_exactly_at_block_size_boundary() {
+        let mut builder = BlockBuilder::new();
+        
+        // Calculate entry size to get close to BLOCK_SIZE
+        // Entry format: 2 bytes key_len + key + 2 bytes value_len + value
+        let entry_size = 2 + 10 + 2 + 10; // 24 bytes per entry
+        let entries_that_fit = BLOCK_SIZE / entry_size;
+        
+        // Add entries until we're close to the limit
+        for i in 0..entries_that_fit {
+            let key = format!("key{:06}", i);
+            let value = format!("value{:04}", i);
+            let result = builder.add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()));
+            assert!(result.is_ok(), "Failed to add entry {} at size {}", i, builder.entry_data.len());
+        }
+        
+        // The next entry should fail due to block being full
+        let result = builder.add(b"overflow", KVWriteValue::Some(b"overflow"));
+        assert!(matches!(result, Err(BlockBuilderError::BlockFull)));
+        
+        let block = builder.build();
+        assert!(block.data.len() <= BLOCK_SIZE);
+    }
+
+    #[test]
+    fn test_block_encode() {
+        let mut builder = BlockBuilder::new();
+        builder.add(b"key1", KVWriteValue::Some(b"value1")).unwrap();
+        builder.add(b"key2", KVWriteValue::Some(b"value2")).unwrap();
+        
+        let block = builder.build();
+        let encoded = block.encode();
+        
+        // Encoded should contain: entry_data + all offsets
+        // 2 entries * 13 bytes each = 26 bytes of entry data
+        // 2 offsets * 2 bytes each = 4 bytes of offset data
+        // Total = 30 bytes
+        assert_eq!(encoded.len(), 30);
+        
+        // Verify that the encoded data starts with the entry data
+        assert_eq!(&encoded[0..block.data.len()], &block.data);
+        
+        // Verify that the offsets are at the end
+        let offset_start = block.data.len();
+        assert_eq!(&encoded[offset_start..offset_start+2], &0u16.to_be_bytes());
+        assert_eq!(&encoded[offset_start+2..offset_start+4], &13u16.to_be_bytes());
+    }
+
+    #[test]
+    fn test_block_builder_comprehensive_scenario() {
+        let mut builder = BlockBuilder::new();
+        let mut total_entries = 0;
+        
+        // Test a realistic scenario with mixed entry sizes
+        let test_data = vec![
+            (b"user:1".as_slice(), KVWriteValue::Some(b"john_doe")),
+            (b"user:2".as_slice(), KVWriteValue::Some(b"jane_smith")),
+            (b"config:timeout".as_slice(), KVWriteValue::Some(b"30")),
+            (b"config:retries".as_slice(), KVWriteValue::Some(b"3")),
+            (b"deleted_user:old".as_slice(), KVWriteValue::Deleted),
+            (b"session:abc123".as_slice(), KVWriteValue::Some(b"active")),
+        ];
+        
+        for (key, value) in test_data {
+            match builder.add(key, value) {
+                Ok(()) => total_entries += 1,
+                Err(BlockBuilderError::BlockFull) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+        
+        assert_eq!(total_entries, 6); // All entries should fit
+        
+        let block = builder.build();
+        assert_eq!(block.offsets.len(), 6);
+        assert!(block.data.len() < BLOCK_SIZE); // Should be well under the limit
+        
+        // Test encoding
+        let encoded = block.encode();
+        assert_eq!(encoded.len(), block.data.len() + (6 * 2)); // data + 6 offsets * 2 bytes each
     }
 }
