@@ -182,4 +182,41 @@ mod tests {
         assert_eq!(entry.size(), 23); // 2 + 15 + 2 + 4
         assert_eq!(entry.size(), entry.encode().len());
     }
+
+    #[test]
+    #[should_panic]
+    fn test_decode_insufficient_data_for_keylen() {
+        let data = vec![0u8]; // Only 1 byte, need 2 for keylen
+        Entry::decode(data);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_decode_insufficient_data_for_key() {
+        let mut data = vec![];
+        data.extend(5u16.to_be_bytes()); // Says key is 5 bytes
+        data.extend(b"hi"); // But only provide 2 bytes
+        Entry::decode(data);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_decode_insufficient_data_for_valuelen() {
+        let mut data = vec![];
+        data.extend(2u16.to_be_bytes()); // Key length
+        data.extend(b"hi"); // Key data
+        data.push(0u8); // Only 1 byte for value length, need 2
+        Entry::decode(data);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_decode_insufficient_data_for_value() {
+        let mut data = vec![];
+        data.extend(2u16.to_be_bytes()); // Key length
+        data.extend(b"hi"); // Key data
+        data.extend(10u16.to_be_bytes()); // Says value is 10 bytes
+        data.extend(b"short"); // But only provide 5 bytes
+        Entry::decode(data);
+    }
 }
