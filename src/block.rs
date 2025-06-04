@@ -103,7 +103,11 @@ pub(crate) struct Block {
     offsets: Vec<u16>,
 }
 impl Block {
-    // fn decode(data: Vec<u8>) -> Block {}
+    // fn decode(data: &[u8]) -> Block {
+    // A block is a series of encoded entries,
+    // followed by the offset of each entry,
+    // followed by the total number of entries.
+    // }
 
     /// Encode to a byte vector. This may be longer or shorter than
     /// the BLOCK_SIZE, as large k/v pairs will create large blocks,
@@ -118,6 +122,7 @@ impl Block {
         for o in &self.offsets {
             buf.extend(o.to_be_bytes());
         }
+        buf.extend((self.offsets.len() as u32).to_be_bytes());
 
         buf
     }
@@ -457,25 +462,30 @@ mod tests {
         let block = builder.build();
         let encoded = block.encode();
 
-        // Encoded should contain: entry_data + all offsets
+        // Encoded should contain: entry_data + all offsets + num_entries
         // 2 entries * 14 bytes each = 28 bytes of entry data
         // 2 offsets * 2 bytes each = 4 bytes of offset data
-        // Total = 32 bytes
-        assert_eq!(encoded.len(), 32);
+        // 1 num_entries * 4 bytes = 4 bytes of num_entries
+        // Total = 36 bytes
+        assert_eq!(encoded.len(), 36);
 
         // Verify that the encoded data starts with the entry data
         assert_eq!(&encoded[0..block.data.len()], &block.data);
 
-        // Verify that the offsets are at the end
-        let offset_start = block.data.len();
+        // Verify that the offsets are in the middle
+        let offsets_start = block.data.len();
         assert_eq!(
-            &encoded[offset_start..offset_start + 2],
+            &encoded[offsets_start..offsets_start + 2],
             &0u16.to_be_bytes()
         );
         assert_eq!(
-            &encoded[offset_start + 2..offset_start + 4],
+            &encoded[offsets_start + 2..offsets_start + 4],
             &14u16.to_be_bytes()
         );
+
+        // Verify that the number of entries is at the end
+        let num_entries_bytes = &encoded[32..36];
+        assert_eq!(num_entries_bytes, &2u32.to_be_bytes());
     }
 
     #[test]
@@ -511,6 +521,66 @@ mod tests {
 
         // Test encoding
         let encoded = block.encode();
-        assert_eq!(encoded.len(), block.data.len() + (6 * 2)); // data + 6 offsets * 2 bytes each
+        assert_eq!(encoded.len(), block.data.len() + (6 * 2) + 4); // data + 6 offsets * 2 bytes each + 4 bytes for num_entries
+    }
+
+    #[test]
+    fn test_block_encode_num_entries_field() {
+        // Test empty block
+        let empty_builder = BlockBuilder::new();
+        let empty_block = empty_builder.build();
+        let empty_encoded = empty_block.encode();
+
+        // Empty block should have 4 bytes for num_entries = 0
+        assert_eq!(empty_encoded.len(), 4);
+        assert_eq!(empty_encoded, &0u32.to_be_bytes());
+
+        // Test single entry block
+        let mut single_builder = BlockBuilder::new();
+        single_builder
+            .add(b"key", KVWriteValue::Some(b"value"))
+            .unwrap();
+        let single_block = single_builder.build();
+        let single_encoded = single_block.encode();
+
+        // Extract num_entries from the end
+        let num_entries_start = single_encoded.len() - 4;
+        assert_eq!(&single_encoded[num_entries_start..], &1u32.to_be_bytes());
+
+        // Test multiple entries block
+        let mut multi_builder = BlockBuilder::new();
+        let num_test_entries = 5;
+        for i in 0..num_test_entries {
+            let key = format!("key{}", i);
+            let value = format!("value{}", i);
+            multi_builder
+                .add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()))
+                .unwrap();
+        }
+        let multi_block = multi_builder.build();
+        let multi_encoded = multi_block.encode();
+
+        // Extract num_entries from the end
+        let num_entries_start = multi_encoded.len() - 4;
+        assert_eq!(
+            &multi_encoded[num_entries_start..],
+            (num_test_entries as u32).to_be_bytes()
+        );
+
+        // Test with deleted entries
+        let mut deleted_builder = BlockBuilder::new();
+        deleted_builder
+            .add(b"live", KVWriteValue::Some(b"data"))
+            .unwrap();
+        deleted_builder.add(b"dead", KVWriteValue::Deleted).unwrap();
+        deleted_builder
+            .add(b"also_live", KVWriteValue::Some(b"more_data"))
+            .unwrap();
+        let deleted_block = deleted_builder.build();
+        let deleted_encoded = deleted_block.encode();
+
+        // Extract num_entries from the end
+        let num_entries_start = deleted_encoded.len() - 4;
+        assert_eq!(&deleted_encoded[num_entries_start..], &3u32.to_be_bytes());
     }
 }
