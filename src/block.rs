@@ -103,11 +103,33 @@ pub(crate) struct Block {
     offsets: Vec<u16>,
 }
 impl Block {
-    // fn decode(data: &[u8]) -> Block {
-    // A block is a series of encoded entries,
-    // followed by the offset of each entry,
-    // followed by the total number of entries.
-    // }
+    pub(crate) fn decode(data: &[u8]) -> Block {
+        assert!(data.len() >= 4);
+        // A block is a series of encoded entries,
+        // followed by the offsets of each entry (as u16),
+        // followed by the total number of entries (as u32).
+        // So:
+        // 1. Find the number of entries
+        // 2. Use that to pull off the offsets.
+        // 3. Then we can separate out the data and the offsets,
+        //    and return as a Block (we'll need to write an iterator
+        //    to get at the entries).
+        let n_entries_bytes: [u8; 4] = data[data.len() - 4..].try_into().unwrap();
+        let n_entries = u32::from_be_bytes(n_entries_bytes);
+
+        // Ensure data length is at least enough for n_entries + offsets
+        let trailers_size: usize = (4 + n_entries * 2) as usize;
+        assert!(data.len() >= trailers_size);
+        let offsets_bytes: &[u8] = &data[data.len() - trailers_size..data.len() - 4];
+
+        Block {
+            offsets: offsets_bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                .collect(),
+            data: data[0..data.len() - trailers_size].to_vec(),
+        }
+    }
 
     /// Encode to a byte vector. This may be longer or shorter than
     /// the BLOCK_SIZE, as large k/v pairs will create large blocks,
@@ -582,5 +604,359 @@ mod tests {
         // Extract num_entries from the end
         let num_entries_start = deleted_encoded.len() - 4;
         assert_eq!(&deleted_encoded[num_entries_start..], &3u32.to_be_bytes());
+    }
+
+    // Block::decode tests
+    #[test]
+    fn test_block_decode_empty_block() {
+        // Create an empty block and test round-trip
+        let empty_builder = BlockBuilder::new();
+        let original_block = empty_builder.build();
+        let encoded = original_block.encode();
+
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.data, original_block.data);
+        assert_eq!(decoded_block.offsets, original_block.offsets);
+        assert_eq!(decoded_block, original_block);
+    }
+
+    #[test]
+    fn test_block_decode_single_entry() {
+        // Create a block with one entry and test round-trip
+        let mut builder = BlockBuilder::new();
+        builder
+            .add(b"test_key", KVWriteValue::Some(b"test_value"))
+            .unwrap();
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.data, original_block.data);
+        assert_eq!(decoded_block.offsets, original_block.offsets);
+        assert_eq!(decoded_block, original_block);
+
+        // Verify specifics
+        assert_eq!(decoded_block.offsets.len(), 1);
+        assert_eq!(decoded_block.offsets[0], 0);
+    }
+
+    #[test]
+    fn test_block_decode_multiple_entries() {
+        // Create a block with multiple entries and test round-trip
+        let mut builder = BlockBuilder::new();
+        builder.add(b"key1", KVWriteValue::Some(b"value1")).unwrap();
+        builder.add(b"key2", KVWriteValue::Some(b"value2")).unwrap();
+        builder.add(b"key3", KVWriteValue::Some(b"value3")).unwrap();
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.data, original_block.data);
+        assert_eq!(decoded_block.offsets, original_block.offsets);
+        assert_eq!(decoded_block, original_block);
+
+        // Verify specifics
+        assert_eq!(decoded_block.offsets.len(), 3);
+        assert_eq!(decoded_block.offsets[0], 0);
+        assert_eq!(decoded_block.offsets[1], 14); // 2+4+2+6 = 14
+        assert_eq!(decoded_block.offsets[2], 28); // 14+14 = 28
+    }
+
+    #[test]
+    fn test_block_decode_with_deleted_entries() {
+        // Create a block with both live and deleted entries
+        let mut builder = BlockBuilder::new();
+        builder
+            .add(b"live_key", KVWriteValue::Some(b"live_value"))
+            .unwrap();
+        builder.add(b"deleted_key", KVWriteValue::Deleted).unwrap();
+        builder
+            .add(b"another_live", KVWriteValue::Some(b"another_value"))
+            .unwrap();
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.data, original_block.data);
+        assert_eq!(decoded_block.offsets, original_block.offsets);
+        assert_eq!(decoded_block, original_block);
+
+        // Verify specifics
+        assert_eq!(decoded_block.offsets.len(), 3);
+    }
+
+    #[test]
+    fn test_block_decode_large_entries() {
+        // Test with larger entries to ensure size handling works
+        let mut builder = BlockBuilder::new();
+        let large_key = vec![b'k'; 1000];
+        let large_value = vec![b'v'; 2000];
+        builder
+            .add(&large_key, KVWriteValue::Some(&large_value))
+            .unwrap();
+
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.data, original_block.data);
+        assert_eq!(decoded_block.offsets, original_block.offsets);
+        assert_eq!(decoded_block, original_block);
+
+        // Verify the large entry was preserved
+        assert_eq!(decoded_block.offsets.len(), 1);
+        assert_eq!(decoded_block.data.len(), 2 + 1000 + 2 + 2000); // keylen + key + valuelen + value
+    }
+
+    #[test]
+    fn test_block_decode_many_small_entries() {
+        // Test with many small entries
+        let mut builder = BlockBuilder::new();
+        let num_entries = 100;
+
+        for i in 0..num_entries {
+            let key = format!("k{:03}", i);
+            let value = format!("v{:03}", i);
+            builder
+                .add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()))
+                .unwrap();
+        }
+
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.data, original_block.data);
+        assert_eq!(decoded_block.offsets, original_block.offsets);
+        assert_eq!(decoded_block, original_block);
+
+        // Verify all entries were preserved
+        assert_eq!(decoded_block.offsets.len(), num_entries);
+    }
+
+    #[test]
+    fn test_block_decode_varied_entry_sizes() {
+        // Test with entries of various sizes
+        let mut builder = BlockBuilder::new();
+
+        // Small entry
+        builder.add(b"a", KVWriteValue::Some(b"1")).unwrap();
+
+        // Medium entry
+        builder
+            .add(b"medium_key", KVWriteValue::Some(b"medium_value_data"))
+            .unwrap();
+
+        // Large entry
+        let large_key = vec![b'L'; 500];
+        let large_value = vec![b'V'; 800];
+        builder
+            .add(&large_key, KVWriteValue::Some(&large_value))
+            .unwrap();
+
+        // Deleted entry
+        builder.add(b"deleted", KVWriteValue::Deleted).unwrap();
+
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.data, original_block.data);
+        assert_eq!(decoded_block.offsets, original_block.offsets);
+        assert_eq!(decoded_block, original_block);
+
+        assert_eq!(decoded_block.offsets.len(), 4);
+    }
+
+    #[test]
+    fn test_block_decode_manual_construction() {
+        // Manually construct encoded block data to test decoding
+        let mut data = Vec::new();
+
+        // Entry 1: key="hello", value="world"
+        data.extend(5u16.to_be_bytes()); // key length
+        data.extend(b"hello"); // key
+        data.extend(5u16.to_be_bytes()); // value length
+        data.extend(b"world"); // value
+
+        // Entry 2: key="foo", value="bar"
+        data.extend(3u16.to_be_bytes()); // key length
+        data.extend(b"foo"); // key
+        data.extend(3u16.to_be_bytes()); // value length
+        data.extend(b"bar"); // value
+
+        // Offsets
+        data.extend(0u16.to_be_bytes()); // offset 0
+        data.extend(14u16.to_be_bytes()); // offset 14 (2+5+2+5=14)
+
+        // Number of entries
+        data.extend(2u32.to_be_bytes());
+
+        let decoded_block = Block::decode(&data);
+
+        assert_eq!(decoded_block.offsets.len(), 2);
+        assert_eq!(decoded_block.offsets[0], 0);
+        assert_eq!(decoded_block.offsets[1], 14);
+
+        // Verify data section is correct (should be 24 bytes: 14 + 10)
+        assert_eq!(decoded_block.data.len(), 24);
+    }
+
+    #[test]
+    #[ignore = "OOOpS we should be asserting these weird cases"]
+    fn test_block_decode_zero_length_keys_and_values() {
+        // Test with zero-length keys and values
+        let mut builder = BlockBuilder::new();
+
+        // Zero-length key, normal value
+        builder.add(b"", KVWriteValue::Some(b"value")).unwrap();
+
+        // Normal key, zero-length value
+        builder.add(b"key", KVWriteValue::Some(b"")).unwrap();
+
+        // Zero-length key and value
+        builder.add(b"", KVWriteValue::Some(b"")).unwrap();
+
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.data, original_block.data);
+        assert_eq!(decoded_block.offsets, original_block.offsets);
+        assert_eq!(decoded_block, original_block);
+
+        assert_eq!(decoded_block.offsets.len(), 3);
+    }
+
+    #[test]
+    fn test_block_decode_comprehensive_round_trip() {
+        // Comprehensive test with various scenarios
+        let mut builder = BlockBuilder::new();
+
+        let test_cases = vec![
+            (b"short".as_slice(), KVWriteValue::Some(b"s")),
+            (
+                b"longer_key_name".as_slice(),
+                KVWriteValue::Some(b"longer_value_data_here"),
+            ),
+            (b"deleted_entry".as_slice(), KVWriteValue::Deleted),
+            (b"".as_slice(), KVWriteValue::Some(b"")), // empty key and value
+            (b"only_key".as_slice(), KVWriteValue::Some(b"")), // empty value
+            (b"".as_slice(), KVWriteValue::Some(b"only_value")), // empty key
+        ];
+
+        for (key, value) in test_cases {
+            builder.add(key, value).unwrap();
+        }
+
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+        let decoded_block = Block::decode(&encoded);
+
+        // Test perfect round-trip
+        assert_eq!(decoded_block, original_block);
+
+        // Test that we can encode the decoded block and get the same result
+        let re_encoded = decoded_block.encode();
+        assert_eq!(re_encoded, encoded);
+
+        // Test decoding the re-encoded data
+        let re_decoded = Block::decode(&re_encoded);
+        assert_eq!(re_decoded, original_block);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_block_decode_insufficient_data_for_num_entries() {
+        // Data too small to contain the 4-byte num_entries field
+        let data = vec![0u8, 1u8, 2u8]; // Only 3 bytes
+        Block::decode(&data);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_block_decode_insufficient_data_for_offsets() {
+        // Data claims to have entries but doesn't have enough space for offsets
+        let mut data = Vec::new();
+        data.extend(b"some_entry_data");
+        data.extend(20u32.to_be_bytes());
+        // Claims 10 entries, so data needs to be 4 + 20*2 = 44 bytes
+        // but it's shorter than that.
+        Block::decode(&data);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_block_decode_inconsistent_trailer_size() {
+        // Create data where num_entries claims more entries than we have space for
+        let mut data = Vec::new();
+        data.extend(b"short");
+        data.extend(0u16.to_be_bytes()); // One offset
+        data.extend(1000u32.to_be_bytes()); // Claims 1000 entries but we only have 1 offset
+
+        Block::decode(&data);
+    }
+
+    #[test]
+    fn test_block_decode_maximum_entries() {
+        // Test with a reasonable number of maximum entries
+        let mut builder = BlockBuilder::new();
+        let mut entries_added = 0;
+
+        // Add small entries until we approach the block size limit
+        for i in 0..1000 {
+            let key = format!("k{}", i);
+            let value = format!("v{}", i);
+
+            match builder.add(key.as_bytes(), KVWriteValue::Some(value.as_bytes())) {
+                Ok(()) => entries_added += 1,
+                Err(BlockBuilderError::BlockFull) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block, original_block);
+        assert_eq!(decoded_block.offsets.len(), entries_added);
+
+        // Ensure offsets are in ascending order (which they should be)
+        for i in 1..decoded_block.offsets.len() {
+            assert!(decoded_block.offsets[i] > decoded_block.offsets[i - 1]);
+        }
+    }
+
+    #[test]
+    fn test_block_decode_preserves_offset_order() {
+        // Test that offsets are preserved in the correct order
+        let mut builder = BlockBuilder::new();
+
+        // Add entries of different sizes to create different offsets
+        builder.add(b"a", KVWriteValue::Some(b"short")).unwrap(); // offset 0
+        builder
+            .add(b"bb", KVWriteValue::Some(b"medium_len"))
+            .unwrap(); // offset 10
+        builder
+            .add(b"ccc", KVWriteValue::Some(b"longer_value_here"))
+            .unwrap(); // offset 26
+
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+        let decoded_block = Block::decode(&encoded);
+
+        assert_eq!(decoded_block.offsets.len(), 3);
+        assert_eq!(decoded_block.offsets[0], 0);
+        assert_eq!(decoded_block.offsets[1], 10);
+        assert_eq!(decoded_block.offsets[2], 26);
     }
 }
