@@ -33,7 +33,9 @@ const BLOCK_SIZE: usize = 4096;
 pub(crate) enum BlockBuilderError {
     BlockFull,
     KeyTooLarge,
+    KeyEmpty,
     ValueTooLarge,
+    ValueEmpty,
 }
 
 pub(crate) struct BlockBuilder {
@@ -56,6 +58,15 @@ impl BlockBuilder {
         // Make sure we don't make it too big by accident.
         assert!(BLOCK_SIZE < u16::MAX as usize);
 
+        // Ensure key and value sizes fit in the u16 we store them as
+        if key.len() == 0 {
+            return Err(BlockBuilderError::KeyEmpty);
+        }
+        if let KVWriteValue::Some(x) = value {
+            if x.len() == 0 {
+                return Err(BlockBuilderError::ValueEmpty); // use Deleted instead
+            }
+        }
         // Ensure key and value sizes fit in the u16 we store them as
         if key.len() > u16::MAX as usize {
             return Err(BlockBuilderError::KeyTooLarge);
@@ -447,6 +458,30 @@ mod tests {
     }
 
     #[test]
+    fn test_block_builder_zero_length_keys_and_values() {
+        // Test with zero-length keys and values
+        let mut builder = BlockBuilder::new();
+
+        // Zero-length key, normal value
+        assert_eq!(
+            builder.add(b"", KVWriteValue::Some(b"value")),
+            Err(BlockBuilderError::KeyEmpty)
+        );
+
+        // Normal key, zero-length value
+        assert_eq!(
+            builder.add(b"key", KVWriteValue::Some(b"")),
+            Err(BlockBuilderError::ValueEmpty)
+        );
+
+        // Zero-length key and value
+        assert_eq!(
+            builder.add(b"", KVWriteValue::Some(b"")),
+            Err(BlockBuilderError::KeyEmpty)
+        );
+    }
+
+    #[test]
     fn test_block_builder_exactly_at_block_size_boundary() {
         let mut builder = BlockBuilder::new();
 
@@ -810,33 +845,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "OOOpS we should be asserting these weird cases"]
-    fn test_block_decode_zero_length_keys_and_values() {
-        // Test with zero-length keys and values
-        let mut builder = BlockBuilder::new();
-
-        // Zero-length key, normal value
-        builder.add(b"", KVWriteValue::Some(b"value")).unwrap();
-
-        // Normal key, zero-length value
-        builder.add(b"key", KVWriteValue::Some(b"")).unwrap();
-
-        // Zero-length key and value
-        builder.add(b"", KVWriteValue::Some(b"")).unwrap();
-
-        let original_block = builder.build();
-        let encoded = original_block.encode();
-
-        let decoded_block = Block::decode(&encoded);
-
-        assert_eq!(decoded_block.data, original_block.data);
-        assert_eq!(decoded_block.offsets, original_block.offsets);
-        assert_eq!(decoded_block, original_block);
-
-        assert_eq!(decoded_block.offsets.len(), 3);
-    }
-
-    #[test]
     fn test_block_decode_comprehensive_round_trip() {
         // Comprehensive test with various scenarios
         let mut builder = BlockBuilder::new();
@@ -848,9 +856,9 @@ mod tests {
                 KVWriteValue::Some(b"longer_value_data_here"),
             ),
             (b"deleted_entry".as_slice(), KVWriteValue::Deleted),
-            (b"".as_slice(), KVWriteValue::Some(b"")), // empty key and value
-            (b"only_key".as_slice(), KVWriteValue::Some(b"")), // empty value
-            (b"".as_slice(), KVWriteValue::Some(b"only_value")), // empty key
+            // duplicate keys are accepted
+            (b"short".as_slice(), KVWriteValue::Some(b"duplicate")),
+            (b"short".as_slice(), KVWriteValue::Some(b"duplicatedagain")),
         ];
 
         for (key, value) in test_cases {
