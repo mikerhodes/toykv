@@ -110,8 +110,8 @@ impl BlockBuilder {
 
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct Block {
-    data: Vec<u8>, // A vec of raw Entry data, at offsets
-    offsets: Vec<u16>,
+    pub(crate) data: Vec<u8>, // A vec of raw Entry data, at offsets
+    pub(crate) offsets: Vec<u16>,
 }
 impl Block {
     pub(crate) fn decode(data: &[u8]) -> Block {
@@ -163,14 +163,14 @@ impl Block {
 
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct Entry {
-    key: Vec<u8>,
-    value: Vec<u8>,
+    pub(crate) key: Vec<u8>,
+    pub(crate) value: Vec<u8>,
 }
 impl Entry {
     fn size(&self) -> usize {
         return 2 + self.key.len() + 2 + self.value.len();
     }
-    fn decode(data: &[u8]) -> Entry {
+    pub(crate) fn decode(data: &[u8]) -> Entry {
         let mut u16buf: [u8; 2] = [0u8; 2];
         let mut c = Cursor::new(data);
 

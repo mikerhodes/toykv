@@ -7,6 +7,7 @@ use sstable::SSTables;
 use wal::WAL;
 
 mod block;
+mod blockiterator;
 pub mod error;
 mod kvrecord;
 mod merge_iterator;
