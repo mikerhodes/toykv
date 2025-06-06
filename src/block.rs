@@ -54,7 +54,11 @@ impl BlockBuilder {
 
     /// Returns true if k/v successfully added to the block, or
     /// false if the block is full.
-    pub(crate) fn add(&mut self, key: &[u8], value: KVWriteValue) -> Result<(), BlockBuilderError> {
+    pub(crate) fn add(
+        &mut self,
+        key: &[u8],
+        value: KVWriteValue,
+    ) -> Result<(), BlockBuilderError> {
         // Make sure we don't make it too big by accident.
         assert!(BLOCK_SIZE < u16::MAX as usize);
 
@@ -87,7 +91,9 @@ impl BlockBuilder {
 
         // If it is our first entry, we can go over the BLOCK_SIZE, as
         // otherwise we couldn't store the block.
-        if !self.entry_data.is_empty() && self.entry_data.len() + e.size() > BLOCK_SIZE {
+        if !self.entry_data.is_empty()
+            && self.entry_data.len() + e.size() > BLOCK_SIZE
+        {
             return Err(BlockBuilderError::BlockFull);
         }
         // entry_data.len() must fit into u16 --- because it must be
@@ -125,13 +131,15 @@ impl Block {
         // 3. Then we can separate out the data and the offsets,
         //    and return as a Block (we'll need to write an iterator
         //    to get at the entries).
-        let n_entries_bytes: [u8; 4] = data[data.len() - 4..].try_into().unwrap();
+        let n_entries_bytes: [u8; 4] =
+            data[data.len() - 4..].try_into().unwrap();
         let n_entries = u32::from_be_bytes(n_entries_bytes);
 
         // Ensure data length is at least enough for n_entries + offsets
         let trailers_size: usize = (4 + n_entries * 2) as usize;
         assert!(data.len() >= trailers_size);
-        let offsets_bytes: &[u8] = &data[data.len() - trailers_size..data.len() - 4];
+        let offsets_bytes: &[u8] =
+            &data[data.len() - trailers_size..data.len() - 4];
 
         Block {
             offsets: offsets_bytes
@@ -398,7 +406,9 @@ mod tests {
             let key = format!("key{:03}", i);
             let value = format!("value{:03}", i);
 
-            match builder.add(key.as_bytes(), KVWriteValue::Some(value.as_bytes())) {
+            match builder
+                .add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()))
+            {
                 Ok(()) => entries_added += 1,
                 Err(BlockBuilderError::BlockFull) => break,
                 Err(e) => panic!("Unexpected error: {:?}", e),
@@ -492,7 +502,8 @@ mod tests {
         for i in 1..129 {
             let key = format!("keykeykey{:05}", i);
             let value = format!("valuevalue{:04}", i);
-            let result = builder.add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()));
+            let result = builder
+                .add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()));
             assert!(
                 result.is_ok(),
                 "Failed to add entry {} at size {}",
@@ -924,7 +935,9 @@ mod tests {
             let key = format!("k{}", i);
             let value = format!("v{}", i);
 
-            match builder.add(key.as_bytes(), KVWriteValue::Some(value.as_bytes())) {
+            match builder
+                .add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()))
+            {
                 Ok(()) => entries_added += 1,
                 Err(BlockBuilderError::BlockFull) => break,
                 Err(e) => panic!("Unexpected error: {:?}", e),
