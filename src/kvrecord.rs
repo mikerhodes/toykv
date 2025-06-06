@@ -45,7 +45,9 @@ pub(crate) struct KVRecord {
 }
 impl KVRecord {
     /// Attempt to read a KVRecord from a Read stream.
-    pub(crate) fn read_one<T: Read>(r: &mut T) -> Result<Option<KVRecord>, Error> {
+    pub(crate) fn read_one<T: Read>(
+        r: &mut T,
+    ) -> Result<Option<KVRecord>, Error> {
         let mut header = [0u8; 9];
         let n = r.read(&mut header)?;
         if n < 9 {

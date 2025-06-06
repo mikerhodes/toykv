@@ -144,16 +144,14 @@ impl ToyKV {
 
     pub fn scan<'a>(&'a self) -> KVIterator<'a> {
         let mut m = MergeIterator::<'a>::new();
-        m.add_iterator(
-            self.memtable
-                .iter()
-                .map(|(key, value)| -> Result<KVRecord, Error> {
-                    Ok(KVRecord {
-                        key: key.clone(),
-                        value: value.clone(),
-                    })
-                }),
-        );
+        m.add_iterator(self.memtable.iter().map(
+            |(key, value)| -> Result<KVRecord, Error> {
+                Ok(KVRecord {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+            },
+        ));
         for t in self.sstables.iters() {
             m.add_iterator(t);
         }

@@ -107,7 +107,8 @@ fn sorted_sstable_files(dir: &Path) -> Result<Vec<DirEntry>, Error> {
         .filter(|p| p.path().extension().is_some_and(|e| e == "data"))
         .filter(|e| {
             e.path().file_stem().is_some_and(|stem| {
-                stem.len() == 10 && stem.to_string_lossy().parse::<u32>().is_ok()
+                stem.len() == 10
+                    && stem.to_string_lossy().parse::<u32>().is_ok()
             })
         })
         .collect();
@@ -417,7 +418,10 @@ mod tests_reader {
         w.finalise()?;
 
         let mut r = SSTablesReader::new(tmp_dir.path())?;
-        assert_eq!(r.get(&[1, 2, 3])?.unwrap(), KVValue::Some(vec![1, 2, 3, 4]));
+        assert_eq!(
+            r.get(&[1, 2, 3])?.unwrap(),
+            KVValue::Some(vec![1, 2, 3, 4])
+        );
         assert_eq!(r.get(&[14])?, None);
 
         Ok(())
@@ -447,8 +451,14 @@ mod tests_reader {
         w.finalise()?;
 
         let mut r = SSTablesReader::new(tmp_dir.path())?;
-        assert_eq!(r.get(&[1, 2, 3])?.unwrap(), KVValue::Some(vec![6, 7, 8, 9]));
-        assert_eq!(r.get(&[23, 24])?.unwrap(), KVValue::Some(vec![100, 122, 4]));
+        assert_eq!(
+            r.get(&[1, 2, 3])?.unwrap(),
+            KVValue::Some(vec![6, 7, 8, 9])
+        );
+        assert_eq!(
+            r.get(&[23, 24])?.unwrap(),
+            KVValue::Some(vec![100, 122, 4])
+        );
         assert_eq!(r.get(&[14])?, None);
 
         Ok(())

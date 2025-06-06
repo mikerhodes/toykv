@@ -67,7 +67,9 @@ pub(crate) fn new(d: &Path, sync: WALSync) -> WAL {
 
 impl WAL {
     /// Replays the WAL into a memtable. Call this first.
-    pub(crate) fn replay(&mut self) -> Result<BTreeMap<Vec<u8>, KVValue>, ToyKVError> {
+    pub(crate) fn replay(
+        &mut self,
+    ) -> Result<BTreeMap<Vec<u8>, KVValue>, ToyKVError> {
         if self.f.is_some() {
             return Err(ToyKVError::BadWALState);
         }
@@ -119,7 +121,11 @@ impl WAL {
     }
 
     /// Appends entry to WAL
-    pub(crate) fn write(&mut self, key: &[u8], value: KVWriteValue) -> Result<(), ToyKVError> {
+    pub(crate) fn write(
+        &mut self,
+        key: &[u8],
+        value: KVWriteValue,
+    ) -> Result<(), ToyKVError> {
         if self.f.is_none() {
             return Err(ToyKVError::BadWALState);
         }
