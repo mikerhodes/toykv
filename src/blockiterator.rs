@@ -50,7 +50,7 @@ impl Iterator for BlockIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         // There is an entry between each index in the
-        // offsets array, so we need to decode a block
+        // offsets array, so we need to decode an entry
         // from the data slice for each offset, until
         // we get to the end.
         let start = match self.b.offsets.get(self.curr_offset_idx) {
