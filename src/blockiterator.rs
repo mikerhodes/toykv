@@ -177,10 +177,14 @@ mod tests {
         // Test iterator behavior with deleted entries - this exposes a bug!
         // The iterator doesn't properly handle deleted entries
         let mut builder = BlockBuilder::new();
-        builder.add(b"live1", KVWriteValue::Some(b"data1")).unwrap();
-        builder.add(b"deleted1", KVWriteValue::Deleted).unwrap();
-        builder.add(b"live2", KVWriteValue::Some(b"data2")).unwrap();
-        builder.add(b"deleted2", KVWriteValue::Deleted).unwrap();
+        builder
+            .add(b"a_live1", KVWriteValue::Some(b"data1"))
+            .unwrap();
+        builder.add(b"b_deleted1", KVWriteValue::Deleted).unwrap();
+        builder
+            .add(b"c_live2", KVWriteValue::Some(b"data2"))
+            .unwrap();
+        builder.add(b"d_deleted2", KVWriteValue::Deleted).unwrap();
 
         let block = builder.build();
         let iterator = BlockIterator::create(Arc::new(block));
@@ -191,16 +195,16 @@ mod tests {
         // BUG: The iterator currently creates KVValue::Some for deleted entries
         // instead of KVValue::Deleted. The deleted entries have empty values,
         // so they become KVValue::Some(vec![]) instead of KVValue::Deleted
-        assert_eq!(items[0].key, b"live1");
+        assert_eq!(items[0].key, b"a_live1");
         assert_eq!(items[0].value, KVValue::Some(b"data1".to_vec()));
 
-        assert_eq!(items[1].key, b"deleted1");
+        assert_eq!(items[1].key, b"b_deleted1");
         assert_eq!(items[1].value, KVValue::Deleted);
 
-        assert_eq!(items[2].key, b"live2");
+        assert_eq!(items[2].key, b"c_live2");
         assert_eq!(items[2].value, KVValue::Some(b"data2".to_vec()));
 
-        assert_eq!(items[3].key, b"deleted2");
+        assert_eq!(items[3].key, b"d_deleted2");
         assert_eq!(items[3].value, KVValue::Deleted);
     }
 
@@ -332,13 +336,13 @@ mod tests {
         // Medium entry
         builder
             .add(
-                b"medium_sized_key",
+                b"b_medium_sized_key",
                 KVWriteValue::Some(b"medium_sized_value"),
             )
             .unwrap();
 
         // Large entry (but reasonable)
-        let large_key = vec![b'L'; 100];
+        let large_key = vec![b'c'; 100];
         let large_value = vec![b'V'; 200];
         builder
             .add(&large_key, KVWriteValue::Some(&large_value))
@@ -350,7 +354,7 @@ mod tests {
             .unwrap();
 
         // Another small entry
-        builder.add(b"b", KVWriteValue::Some(b"2")).unwrap();
+        builder.add(b"e", KVWriteValue::Some(b"2")).unwrap();
 
         let block = builder.build();
         let iterator = BlockIterator::create(Arc::new(block));
@@ -362,57 +366,20 @@ mod tests {
         assert_eq!(items[0].key, b"a");
         assert_eq!(items[0].value, KVValue::Some(b"1".to_vec()));
 
-        assert_eq!(items[1].key, b"medium_sized_key");
+        assert_eq!(items[1].key, b"b_medium_sized_key");
         assert_eq!(
             items[1].value,
             KVValue::Some(b"medium_sized_value".to_vec())
         );
 
-        assert_eq!(items[2].key.len(), 100);
-        assert!(items[2].key.iter().all(|&b| b == b'L'));
+        assert_eq!(items[2].key, large_key);
         assert_eq!(items[2].value, KVValue::Some(large_value));
 
         assert_eq!(items[3].key, b"deleted_entry");
         assert_eq!(items[3].value, KVValue::Deleted);
 
-        assert_eq!(items[4].key, b"b");
+        assert_eq!(items[4].key, b"e");
         assert_eq!(items[4].value, KVValue::Some(b"2".to_vec()));
-    }
-
-    #[test]
-    fn test_block_iterator_duplicate_keys() {
-        // Test iterator with duplicate keys (which BlockBuilder allows)
-        let mut builder = BlockBuilder::new();
-
-        builder
-            .add(b"duplicate", KVWriteValue::Some(b"first"))
-            .unwrap();
-        builder
-            .add(b"other", KVWriteValue::Some(b"middle"))
-            .unwrap();
-        builder
-            .add(b"duplicate", KVWriteValue::Some(b"second"))
-            .unwrap();
-        builder.add(b"duplicate", KVWriteValue::Deleted).unwrap();
-
-        let block = builder.build();
-        let iterator = BlockIterator::create(Arc::new(block));
-
-        let items: Vec<KVRecord> = iterator.collect();
-        assert_eq!(items.len(), 4);
-
-        // All duplicate key entries should be preserved in order
-        assert_eq!(items[0].key, b"duplicate");
-        assert_eq!(items[0].value, KVValue::Some(b"first".to_vec()));
-
-        assert_eq!(items[1].key, b"other");
-        assert_eq!(items[1].value, KVValue::Some(b"middle".to_vec()));
-
-        assert_eq!(items[2].key, b"duplicate");
-        assert_eq!(items[2].value, KVValue::Some(b"second".to_vec()));
-
-        assert_eq!(items[3].key, b"duplicate");
-        assert_eq!(items[3].value, KVValue::Deleted);
     }
 
     #[test]
@@ -422,15 +389,15 @@ mod tests {
 
         // Create entries with predictable sizes to test offset boundaries
         // Entry 1: key="x" (1) + value="y" (1) + headers (4) = 6 bytes total
-        builder.add(b"x", KVWriteValue::Some(b"y")).unwrap();
+        builder.add(b"a", KVWriteValue::Some(b"y")).unwrap();
 
         // Entry 2: key="ab" (2) + value="cd" (2) + headers (4) = 8 bytes total
         // Should start at offset 6
-        builder.add(b"ab", KVWriteValue::Some(b"cd")).unwrap();
+        builder.add(b"bc", KVWriteValue::Some(b"cd")).unwrap();
 
         // Entry 3: key="efg" (3) + value="hij" (3) + headers (4) = 10 bytes total
         // Should start at offset 14
-        builder.add(b"efg", KVWriteValue::Some(b"hij")).unwrap();
+        builder.add(b"def", KVWriteValue::Some(b"hij")).unwrap();
 
         let block = builder.build();
 
@@ -445,13 +412,13 @@ mod tests {
         let items: Vec<KVRecord> = iterator.collect();
         assert_eq!(items.len(), 3);
 
-        assert_eq!(items[0].key, b"x");
+        assert_eq!(items[0].key, b"a");
         assert_eq!(items[0].value, KVValue::Some(b"y".to_vec()));
 
-        assert_eq!(items[1].key, b"ab");
+        assert_eq!(items[1].key, b"bc");
         assert_eq!(items[1].value, KVValue::Some(b"cd".to_vec()));
 
-        assert_eq!(items[2].key, b"efg");
+        assert_eq!(items[2].key, b"def");
         assert_eq!(items[2].value, KVValue::Some(b"hij".to_vec()));
     }
 
@@ -461,11 +428,13 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         builder
-            .add(b"encode_test", KVWriteValue::Some(b"should_work"))
+            .add(b"a_encode_test", KVWriteValue::Some(b"should_work"))
             .unwrap();
-        builder.add(b"deleted_test", KVWriteValue::Deleted).unwrap();
         builder
-            .add(b"final_test", KVWriteValue::Some(b"final_value"))
+            .add(b"b_deleted_test", KVWriteValue::Deleted)
+            .unwrap();
+        builder
+            .add(b"c_final_test", KVWriteValue::Some(b"final_value"))
             .unwrap();
 
         let original_block = builder.build();
@@ -478,13 +447,13 @@ mod tests {
         let items: Vec<KVRecord> = iterator.collect();
         assert_eq!(items.len(), 3);
 
-        assert_eq!(items[0].key, b"encode_test");
+        assert_eq!(items[0].key, b"a_encode_test");
         assert_eq!(items[0].value, KVValue::Some(b"should_work".to_vec()));
 
-        assert_eq!(items[1].key, b"deleted_test");
+        assert_eq!(items[1].key, b"b_deleted_test");
         assert_eq!(items[1].value, KVValue::Deleted);
 
-        assert_eq!(items[2].key, b"final_test");
+        assert_eq!(items[2].key, b"c_final_test");
         assert_eq!(items[2].value, KVValue::Some(b"final_value".to_vec()));
     }
 
@@ -582,27 +551,29 @@ mod tests {
         // Test with keys containing null bytes and other special values
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"before\x00key", KVWriteValue::Some(b"val1"))
+            .add(b"a_before\x00key", KVWriteValue::Some(b"val1"))
             .unwrap();
         builder
-            .add(b"normal_key", KVWriteValue::Some(b"val2"))
+            .add(b"b_normal_key", KVWriteValue::Some(b"val2"))
             .unwrap();
         builder
-            .add(b"after\xff\x00", KVWriteValue::Some(b"val3"))
+            .add(b"c_after\xff\x00", KVWriteValue::Some(b"val3"))
             .unwrap();
         let block = Arc::new(builder.build());
 
         // Test seeking to keys with null bytes
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"before\x00");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            b"a_before\x00",
+        );
         let result = it.next().unwrap();
-        assert_eq!(result.key, b"before\x00key");
+        assert_eq!(result.key, b"a_before\x00key");
 
         // Test seeking to exact null byte sequences
         let mut it =
-            BlockIterator::create_and_seek_to_key(block, b"normal\x00");
+            BlockIterator::create_and_seek_to_key(block, b"b_normal\x00");
         let result = it.next().unwrap();
-        assert_eq!(result.key, b"normal_key");
+        assert_eq!(result.key, b"b_normal_key");
     }
 
     #[test]
@@ -668,28 +639,6 @@ mod tests {
         let mut it =
             BlockIterator::create_and_seek_to_key(block.clone(), b"aa\xff");
         assert_eq!(it.next().unwrap().key, b"aba");
-    }
-
-    #[test]
-    fn test_seek_with_duplicate_keys() {
-        // Test seeking when block has duplicate keys
-        // TODO should builder be preventing this?
-        let mut builder = BlockBuilder::new();
-        builder.add(b"dup", KVWriteValue::Some(b"first")).unwrap();
-        builder.add(b"dup", KVWriteValue::Some(b"second")).unwrap();
-        let block = Arc::new(builder.build());
-
-        // Should position at first occurrence
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"dup");
-        let first = it.next().unwrap();
-        assert_eq!(first.key, b"dup");
-        assert_eq!(first.value, KVValue::Some(b"first".to_vec()));
-
-        // Verify we can iterate through all duplicates
-        let second = it.next().unwrap();
-        assert_eq!(second.key, b"dup");
-        assert_eq!(second.value, KVValue::Some(b"second".to_vec()));
     }
 
     #[test]
