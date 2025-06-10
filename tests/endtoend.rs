@@ -81,6 +81,7 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
     assert_eq!(writes as u64, db.metrics.writes);
     assert_eq!(0, db.metrics.reads);
     for n in 1..(writes + 1) {
+        dbg!("read loop db1");
         let got = db.get(n.to_be_bytes())?;
         assert_eq!(
             got.unwrap(),
@@ -92,6 +93,7 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
 
     let mut db2 = toykv::open(tmp_dir.path())?;
     for n in 1..(writes + 1) {
+        dbg!("read loop db2");
         let got = db2.get(n.to_be_bytes())?;
         assert_eq!(
             got.unwrap(),
@@ -177,7 +179,7 @@ fn operations_blocked_after_shutdown() -> Result<(), ToyKVError> {
     }
 
     let mut cnt = 0;
-    for _ in db.scan() {
+    for _ in db.scan()? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
@@ -209,7 +211,7 @@ fn scan() -> Result<(), ToyKVError> {
     }
 
     let mut cnt = 0;
-    for _ in db.scan() {
+    for _ in db.scan()? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
@@ -236,9 +238,9 @@ fn scan_on_reopen() -> Result<(), ToyKVError> {
 
     db.shutdown();
 
-    let mut db2 = toykv::open(tmp_dir.path())?;
+    let db2 = toykv::open(tmp_dir.path())?;
     let mut cnt = 0;
-    for _ in db2.scan() {
+    for _ in db2.scan()? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
@@ -265,16 +267,16 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
     }
 
     let mut cnt = 0;
-    for _ in db.scan() {
+    for _ in db.scan()? {
         cnt += 1;
     }
     assert_eq!(cnt, writes / 2);
 
     db.shutdown();
 
-    let mut db2 = toykv::open(tmp_dir.path())?;
+    let db2 = toykv::open(tmp_dir.path())?;
     cnt = 0;
-    for _ in db2.scan() {
+    for _ in db2.scan()? {
         cnt += 1;
     }
     assert_eq!(cnt, writes / 2);
