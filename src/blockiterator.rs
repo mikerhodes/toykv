@@ -11,7 +11,7 @@ pub(crate) struct BlockIterator {
     curr_offset_idx: usize,
 }
 impl BlockIterator {
-    fn create(b: Arc<Block>) -> BlockIterator {
+    pub(crate) fn create(b: Arc<Block>) -> BlockIterator {
         BlockIterator {
             b,
             curr_offset_idx: 0,
@@ -93,16 +93,16 @@ mod tests {
 
         // Add some test entries
         builder
-            .add(b"apple", KVWriteValue::Some(b"red fruit"))
+            .add(b"apple", &KVWriteValue::Some(b"red fruit"))
             .unwrap();
         builder
-            .add(b"banana", KVWriteValue::Some(b"yellow fruit"))
+            .add(b"banana", &KVWriteValue::Some(b"yellow fruit"))
             .unwrap();
         builder
-            .add(b"cherry", KVWriteValue::Some(b"small red fruit"))
+            .add(b"cherry", &KVWriteValue::Some(b"small red fruit"))
             .unwrap();
         builder
-            .add(b"date", KVWriteValue::Some(b"brown fruit"))
+            .add(b"date", &KVWriteValue::Some(b"brown fruit"))
             .unwrap();
 
         // Build the block
@@ -152,7 +152,7 @@ mod tests {
         // Test iterator with exactly one entry
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"only_key", KVWriteValue::Some(b"only_value"))
+            .add(b"only_key", &KVWriteValue::Some(b"only_value"))
             .unwrap();
 
         let block = builder.build();
@@ -178,13 +178,13 @@ mod tests {
         // The iterator doesn't properly handle deleted entries
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"a_live1", KVWriteValue::Some(b"data1"))
+            .add(b"a_live1", &KVWriteValue::Some(b"data1"))
             .unwrap();
-        builder.add(b"b_deleted1", KVWriteValue::Deleted).unwrap();
+        builder.add(b"b_deleted1", &KVWriteValue::Deleted).unwrap();
         builder
-            .add(b"c_live2", KVWriteValue::Some(b"data2"))
+            .add(b"c_live2", &KVWriteValue::Some(b"data2"))
             .unwrap();
-        builder.add(b"d_deleted2", KVWriteValue::Deleted).unwrap();
+        builder.add(b"d_deleted2", &KVWriteValue::Deleted).unwrap();
 
         let block = builder.build();
         let iterator = BlockIterator::create(Arc::new(block));
@@ -212,8 +212,12 @@ mod tests {
     fn test_block_iterator_exhaustion_behavior() {
         // Test iterator behavior after exhaustion
         let mut builder = BlockBuilder::new();
-        builder.add(b"key1", KVWriteValue::Some(b"value1")).unwrap();
-        builder.add(b"key2", KVWriteValue::Some(b"value2")).unwrap();
+        builder
+            .add(b"key1", &KVWriteValue::Some(b"value1"))
+            .unwrap();
+        builder
+            .add(b"key2", &KVWriteValue::Some(b"value2"))
+            .unwrap();
 
         let block = builder.build();
         let mut iterator = BlockIterator::create(Arc::new(block));
@@ -238,9 +242,9 @@ mod tests {
     fn test_block_iterator_step_by_step() {
         // Test step-by-step iteration instead of collect()
         let mut builder = BlockBuilder::new();
-        builder.add(b"first", KVWriteValue::Some(b"1")).unwrap();
-        builder.add(b"second", KVWriteValue::Some(b"2")).unwrap();
-        builder.add(b"third", KVWriteValue::Some(b"3")).unwrap();
+        builder.add(b"first", &KVWriteValue::Some(b"1")).unwrap();
+        builder.add(b"second", &KVWriteValue::Some(b"2")).unwrap();
+        builder.add(b"third", &KVWriteValue::Some(b"3")).unwrap();
 
         let block = builder.build();
         let mut iterator = BlockIterator::create(Arc::new(block));
@@ -274,7 +278,7 @@ mod tests {
         let large_value = vec![b'V'; 2000];
 
         builder
-            .add(&large_key, KVWriteValue::Some(&large_value))
+            .add(&large_key, &KVWriteValue::Some(&large_value))
             .unwrap();
 
         let block = builder.build();
@@ -299,7 +303,7 @@ mod tests {
             let key = format!("key{:03}", i);
             let value = format!("val{:03}", i);
             match builder
-                .add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
             {
                 Ok(()) => {}
                 Err(_) => break, // Block is full
@@ -331,13 +335,13 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         // Tiny entry
-        builder.add(b"a", KVWriteValue::Some(b"1")).unwrap();
+        builder.add(b"a", &KVWriteValue::Some(b"1")).unwrap();
 
         // Medium entry
         builder
             .add(
                 b"b_medium_sized_key",
-                KVWriteValue::Some(b"medium_sized_value"),
+                &KVWriteValue::Some(b"medium_sized_value"),
             )
             .unwrap();
 
@@ -345,16 +349,16 @@ mod tests {
         let large_key = vec![b'c'; 100];
         let large_value = vec![b'V'; 200];
         builder
-            .add(&large_key, KVWriteValue::Some(&large_value))
+            .add(&large_key, &KVWriteValue::Some(&large_value))
             .unwrap();
 
         // Deleted entry
         builder
-            .add(b"deleted_entry", KVWriteValue::Deleted)
+            .add(b"deleted_entry", &KVWriteValue::Deleted)
             .unwrap();
 
         // Another small entry
-        builder.add(b"e", KVWriteValue::Some(b"2")).unwrap();
+        builder.add(b"e", &KVWriteValue::Some(b"2")).unwrap();
 
         let block = builder.build();
         let iterator = BlockIterator::create(Arc::new(block));
@@ -389,15 +393,15 @@ mod tests {
 
         // Create entries with predictable sizes to test offset boundaries
         // Entry 1: key="x" (1) + value="y" (1) + headers (4) = 6 bytes total
-        builder.add(b"a", KVWriteValue::Some(b"y")).unwrap();
+        builder.add(b"a", &KVWriteValue::Some(b"y")).unwrap();
 
         // Entry 2: key="ab" (2) + value="cd" (2) + headers (4) = 8 bytes total
         // Should start at offset 6
-        builder.add(b"bc", KVWriteValue::Some(b"cd")).unwrap();
+        builder.add(b"bc", &KVWriteValue::Some(b"cd")).unwrap();
 
         // Entry 3: key="efg" (3) + value="hij" (3) + headers (4) = 10 bytes total
         // Should start at offset 14
-        builder.add(b"def", KVWriteValue::Some(b"hij")).unwrap();
+        builder.add(b"def", &KVWriteValue::Some(b"hij")).unwrap();
 
         let block = builder.build();
 
@@ -428,13 +432,13 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         builder
-            .add(b"a_encode_test", KVWriteValue::Some(b"should_work"))
+            .add(b"a_encode_test", &KVWriteValue::Some(b"should_work"))
             .unwrap();
         builder
-            .add(b"b_deleted_test", KVWriteValue::Deleted)
+            .add(b"b_deleted_test", &KVWriteValue::Deleted)
             .unwrap();
         builder
-            .add(b"c_final_test", KVWriteValue::Some(b"final_value"))
+            .add(b"c_final_test", &KVWriteValue::Some(b"final_value"))
             .unwrap();
 
         let original_block = builder.build();
@@ -466,7 +470,7 @@ mod tests {
             let key = format!("key{}", i);
             let value = format!("value{}", i);
             builder
-                .add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
                 .unwrap();
         }
 
@@ -498,7 +502,7 @@ mod tests {
             let key = format!("key{:03}", i);
             let value = format!("value{:03}", i);
             builder
-                .add(key.as_bytes(), KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
                 .unwrap();
         }
 
@@ -537,8 +541,8 @@ mod tests {
     fn test_seek_empty_key_target() {
         // Test seeking to empty key b""
         let mut builder = BlockBuilder::new();
-        builder.add(b"a", KVWriteValue::Some(b"1")).unwrap();
-        builder.add(b"b", KVWriteValue::Some(b"2")).unwrap();
+        builder.add(b"a", &KVWriteValue::Some(b"1")).unwrap();
+        builder.add(b"b", &KVWriteValue::Some(b"2")).unwrap();
         let block = Arc::new(builder.build());
 
         let mut it = BlockIterator::create_and_seek_to_key(block, b"");
@@ -551,13 +555,13 @@ mod tests {
         // Test with keys containing null bytes and other special values
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"a_before\x00key", KVWriteValue::Some(b"val1"))
+            .add(b"a_before\x00key", &KVWriteValue::Some(b"val1"))
             .unwrap();
         builder
-            .add(b"b_normal_key", KVWriteValue::Some(b"val2"))
+            .add(b"b_normal_key", &KVWriteValue::Some(b"val2"))
             .unwrap();
         builder
-            .add(b"c_after\xff\x00", KVWriteValue::Some(b"val3"))
+            .add(b"c_after\xff\x00", &KVWriteValue::Some(b"val3"))
             .unwrap();
         let block = Arc::new(builder.build());
 
@@ -580,12 +584,12 @@ mod tests {
     fn test_seek_prefix_vs_full_key_comparison() {
         // Test cases where target key is prefix of existing key or vice versa
         let mut builder = BlockBuilder::new();
-        builder.add(b"key", KVWriteValue::Some(b"short")).unwrap();
+        builder.add(b"key", &KVWriteValue::Some(b"short")).unwrap();
         builder
-            .add(b"key_extended", KVWriteValue::Some(b"long"))
+            .add(b"key_extended", &KVWriteValue::Some(b"long"))
             .unwrap();
         builder
-            .add(b"key_more", KVWriteValue::Some(b"longer"))
+            .add(b"key_more", &KVWriteValue::Some(b"longer"))
             .unwrap();
         let block = Arc::new(builder.build());
 
@@ -621,10 +625,10 @@ mod tests {
     fn test_seek_single_byte_differences() {
         // Test keys that differ by single byte in various positions
         let mut builder = BlockBuilder::new();
-        builder.add(b"aaa", KVWriteValue::Some(b"1")).unwrap();
-        builder.add(b"aab", KVWriteValue::Some(b"2")).unwrap();
-        builder.add(b"aba", KVWriteValue::Some(b"3")).unwrap();
-        builder.add(b"baa", KVWriteValue::Some(b"4")).unwrap();
+        builder.add(b"aaa", &KVWriteValue::Some(b"1")).unwrap();
+        builder.add(b"aab", &KVWriteValue::Some(b"2")).unwrap();
+        builder.add(b"aba", &KVWriteValue::Some(b"3")).unwrap();
+        builder.add(b"baa", &KVWriteValue::Some(b"4")).unwrap();
         let block = Arc::new(builder.build());
 
         // Should find exact matches and next greater for non-matches
@@ -646,19 +650,19 @@ mod tests {
         // Test with keys containing min/max byte values
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"\x00\x00\x00", KVWriteValue::Some(b"min"))
+            .add(b"\x00\x00\x00", &KVWriteValue::Some(b"min"))
             .unwrap();
         builder
-            .add(b"\x00\xff\x00", KVWriteValue::Some(b"mixed1"))
+            .add(b"\x00\xff\x00", &KVWriteValue::Some(b"mixed1"))
             .unwrap();
         builder
-            .add(b"\x80\x80\x80", KVWriteValue::Some(b"middle"))
+            .add(b"\x80\x80\x80", &KVWriteValue::Some(b"middle"))
             .unwrap();
         builder
-            .add(b"\xff\x00\xff", KVWriteValue::Some(b"mixed2"))
+            .add(b"\xff\x00\xff", &KVWriteValue::Some(b"mixed2"))
             .unwrap();
         builder
-            .add(b"\xff\xff\xff", KVWriteValue::Some(b"max"))
+            .add(b"\xff\xff\xff", &KVWriteValue::Some(b"max"))
             .unwrap();
         let block = Arc::new(builder.build());
 
@@ -680,7 +684,7 @@ mod tests {
     #[test]
     fn test_multiple_seeks_on_same_block() {
         // Test multiple seek operations on the same block
-        let v = || KVWriteValue::Some(b"fruit");
+        let v = || &KVWriteValue::Some(b"fruit");
         let mut builder = BlockBuilder::new();
         builder.add(b"apple", v()).unwrap();
         builder.add(b"banana", v()).unwrap();
@@ -711,15 +715,15 @@ mod tests {
         // Test seeking behavior with mix of live and deleted entries
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"a_alive1", KVWriteValue::Some(b"data"))
+            .add(b"a_alive1", &KVWriteValue::Some(b"data"))
             .unwrap();
-        builder.add(b"a_deleted1", KVWriteValue::Deleted).unwrap();
+        builder.add(b"a_deleted1", &KVWriteValue::Deleted).unwrap();
         builder
-            .add(b"b_alive2", KVWriteValue::Some(b"data"))
+            .add(b"b_alive2", &KVWriteValue::Some(b"data"))
             .unwrap();
-        builder.add(b"b_deleted2", KVWriteValue::Deleted).unwrap();
+        builder.add(b"b_deleted2", &KVWriteValue::Deleted).unwrap();
         builder
-            .add(b"c_alive3", KVWriteValue::Some(b"data"))
+            .add(b"c_alive3", &KVWriteValue::Some(b"data"))
             .unwrap();
         let block = Arc::new(builder.build());
 
@@ -742,8 +746,10 @@ mod tests {
     fn test_seek_arc_block_memory_behavior() {
         // Test that Arc<Block> is handled properly across multiple seeks
         let mut builder = BlockBuilder::new();
-        builder.add(b"memory", KVWriteValue::Some(b"test")).unwrap();
-        builder.add(b"ref", KVWriteValue::Some(b"count")).unwrap();
+        builder
+            .add(b"memory", &KVWriteValue::Some(b"test"))
+            .unwrap();
+        builder.add(b"ref", &KVWriteValue::Some(b"count")).unwrap();
         let block = Arc::new(builder.build());
 
         let original_strong_count = Arc::strong_count(&block);

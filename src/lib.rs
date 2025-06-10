@@ -12,6 +12,7 @@ pub mod error;
 mod kvrecord;
 mod merge_iterator;
 mod sstable;
+mod table;
 mod wal;
 
 #[derive(PartialEq, Eq, Debug)]

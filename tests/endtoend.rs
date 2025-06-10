@@ -236,7 +236,7 @@ fn scan_on_reopen() -> Result<(), ToyKVError> {
 
     db.shutdown();
 
-    let mut db2 = toykv::open(tmp_dir.path())?;
+    let db2 = toykv::open(tmp_dir.path())?;
     let mut cnt = 0;
     for _ in db2.scan() {
         cnt += 1;
@@ -272,7 +272,7 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
 
     db.shutdown();
 
-    let mut db2 = toykv::open(tmp_dir.path())?;
+    let db2 = toykv::open(tmp_dir.path())?;
     cnt = 0;
     for _ in db2.scan() {
         cnt += 1;
