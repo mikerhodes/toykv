@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, io::Error, path::Path};
 use error::ToyKVError;
 use kvrecord::{KVRecord, KVValue};
 use merge_iterator::MergeIterator;
-use sstable::SSTables;
+use table::SSTables;
 use wal::WAL;
 
 mod block;
@@ -12,6 +12,7 @@ pub mod error;
 mod kvrecord;
 mod merge_iterator;
 mod sstable;
+mod table;
 mod wal;
 
 #[derive(PartialEq, Eq, Debug)]
@@ -49,7 +50,7 @@ pub fn with_sync(d: &Path, sync: WALSync) -> Result<ToyKV, ToyKVError> {
 
     let mut wal = wal::new(d, sync);
     let memtable = wal.replay()?;
-    let sstables = sstable::SSTables::new(d)?;
+    let sstables = table::SSTables::new(d)?;
     Ok(ToyKV {
         memtable,
         wal,
@@ -142,7 +143,7 @@ impl ToyKV {
     // /// Immediately terminate (for use during testing, "pretend to crash")
     // pub(crate) fn terminate(&mut self) {}
 
-    pub fn scan<'a>(&'a self) -> KVIterator<'a> {
+    pub fn scan<'a>(&'a self) -> Result<KVIterator<'a>, Error> {
         let mut m = MergeIterator::<'a>::new();
         m.add_iterator(self.memtable.iter().map(
             |(key, value)| -> Result<KVRecord, Error> {
@@ -152,10 +153,10 @@ impl ToyKV {
                 })
             },
         ));
-        for t in self.sstables.iters() {
+        for t in self.sstables.iters()? {
             m.add_iterator(t);
         }
-        KVIterator { i: m }
+        Ok(KVIterator { i: m })
     }
 }
 
