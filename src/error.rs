@@ -7,6 +7,8 @@ pub enum ToyKVError {
     BadWALSeq { expected: u32, actual: u32 },
     KeyTooLarge,
     ValueTooLarge,
+    KeyEmpty,
+    ValueEmpty,
     DatabaseShutdown,
 }
 

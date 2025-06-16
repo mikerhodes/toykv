@@ -73,8 +73,14 @@ impl ToyKV {
     {
         let k: Vec<u8> = k.into();
         let v: Vec<u8> = v.into();
+        if k.len() == 0 {
+            return Err(ToyKVError::KeyEmpty);
+        }
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
+        }
+        if v.len() == 0 {
+            return Err(ToyKVError::ValueEmpty);
         }
         if v.len() > MAX_VALUE_SIZE {
             return Err(ToyKVError::ValueTooLarge);
@@ -89,6 +95,9 @@ impl ToyKV {
         S: Into<Vec<u8>>,
     {
         let k: Vec<u8> = k.into();
+        if k.len() == 0 {
+            return Err(ToyKVError::KeyEmpty);
+        }
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
@@ -115,6 +124,9 @@ impl ToyKV {
         S: Into<Vec<u8>>,
     {
         let k: Vec<u8> = k.into();
+        if k.len() == 0 {
+            return Err(ToyKVError::KeyEmpty);
+        }
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
@@ -178,13 +190,15 @@ impl<'a> Iterator for KVIterator<'a> {
             match self.i.next() {
                 None => return None,
                 Some(Err(e)) => return Some(Err(e)),
-                Some(Ok(kvr)) if kvr.value == KVValue::Deleted => continue,
-                Some(Ok(kvr)) => {
-                    return Some(Ok(KV {
-                        key: kvr.key,
-                        value: vec![],
-                    }))
-                }
+                Some(Ok(kvr)) => match kvr.value {
+                    KVValue::Deleted => continue,
+                    KVValue::Some(x) => {
+                        return Some(Ok(KV {
+                            key: kvr.key,
+                            value: x,
+                        }))
+                    }
+                },
             }
         }
     }
