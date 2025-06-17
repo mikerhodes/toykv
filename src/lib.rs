@@ -35,32 +35,75 @@ pub struct ToyKV {
     wal: WAL,
     sstables: SSTables,
     pub metrics: ToyKVMetrics,
+    wal_write_threshold: u64,
+}
+
+struct ToyKVOptions {
+    wal_sync: WALSync,
+    wal_write_threshold: u64,
+    // max_sstable_size: u64,
+}
+
+pub struct ToyKVBuilder {
+    options: ToyKVOptions,
+}
+
+impl Default for ToyKVOptions {
+    fn default() -> Self {
+        Self {
+            wal_sync: WALSync::Full,
+            wal_write_threshold: 5_000, // At 50kb kv pairs, 256MB
+                                        // max_sstable_size: 16 * 1024 * 1024,
+        }
+    }
+}
+
+impl ToyKVBuilder {
+    pub fn new() -> ToyKVBuilder {
+        ToyKVBuilder {
+            options: ToyKVOptions::default(),
+        }
+    }
+
+    pub fn wal_sync(mut self, sync: WALSync) -> Self {
+        self.options.wal_sync = sync;
+        self
+    }
+
+    /// How many writes to a WAL before we SSTable it.
+    pub fn wal_write_threshold(mut self, max: u64) -> Self {
+        self.options.wal_write_threshold = max;
+        self
+    }
+
+    // pub fn max_sstable_size(mut self, size: usize) -> Self {
+    //     self.options.max_sstable_size = size;
+    //     self
+    // }
+
+    pub fn open(self, d: &Path) -> Result<ToyKV, ToyKVError> {
+        if !d.is_dir() {
+            return Err(ToyKVError::DataDirMissing);
+        }
+
+        let mut wal = wal::new(d, self.options.wal_sync);
+        let memtable = wal.replay()?;
+        let sstables = table::SSTables::new(d)?;
+        Ok(ToyKV {
+            memtable,
+            wal,
+            sstables,
+            metrics: Default::default(),
+            wal_write_threshold: self.options.wal_write_threshold,
+        })
+    }
 }
 
 /// Open a database using default settings.
 pub fn open(d: &Path) -> Result<ToyKV, ToyKVError> {
-    with_sync(d, WALSync::Full)
+    ToyKVBuilder::new().open(d)
 }
 
-/// Open a database using a specific WALSync strategy.
-pub fn with_sync(d: &Path, sync: WALSync) -> Result<ToyKV, ToyKVError> {
-    if !d.is_dir() {
-        return Err(ToyKVError::DataDirMissing);
-    }
-
-    let mut wal = wal::new(d, sync);
-    let memtable = wal.replay()?;
-    let sstables = table::SSTables::new(d)?;
-    Ok(ToyKV {
-        memtable,
-        wal,
-        sstables,
-        metrics: Default::default(),
-    })
-}
-
-/// How many writes to a WAL before we SSTable it.
-const WAL_WRITE_THRESHOLD: u32 = 1000;
 const MAX_KEY_SIZE: usize = 10_240; // 10kb
 const MAX_VALUE_SIZE: usize = 102_400; // 100kb
 
@@ -109,7 +152,7 @@ impl ToyKV {
     fn write(&mut self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
         self.wal.write(&k, (&v).into())?;
         self.memtable.insert(k, v);
-        if self.wal.wal_writes >= WAL_WRITE_THRESHOLD {
+        if self.wal.wal_writes >= self.wal_write_threshold {
             self.sstables.write_new_sstable(&self.memtable)?;
             self.wal.reset()?;
             self.memtable.clear();

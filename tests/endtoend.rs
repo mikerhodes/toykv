@@ -1,4 +1,4 @@
-use toykv::{error::ToyKVError, WALSync};
+use toykv::{error::ToyKVError, ToyKVBuilder, WALSync};
 
 #[test]
 fn insert_and_readback() -> Result<(), ToyKVError> {
@@ -70,7 +70,11 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
 
     let writes = 2500i64;
 
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
+
     for n in 1..(writes + 1) {
         match db.set(n.to_be_bytes(), n.to_le_bytes()) {
             Ok(it) => it,
@@ -112,7 +116,10 @@ fn deletes() -> Result<(), ToyKVError> {
 
     let writes = 2500i64;
 
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     let k = "foo";
     db.set(k, "bar")?;
@@ -169,7 +176,10 @@ fn operations_blocked_after_shutdown() -> Result<(), ToyKVError> {
 
     let writes = 2500i64;
 
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     for n in 1..(writes + 1) {
         match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
@@ -201,7 +211,10 @@ fn scan() -> Result<(), ToyKVError> {
 
     let writes = 2500i64;
 
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     for n in 1..(writes + 1) {
         match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
@@ -227,7 +240,10 @@ fn scan_on_reopen() -> Result<(), ToyKVError> {
 
     let writes = 2500i64;
 
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     for n in 1..(writes + 1) {
         match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
@@ -254,7 +270,10 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
 
     let writes = 2500i64;
 
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     for n in 1..=writes {
         db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec())?
@@ -436,7 +455,10 @@ fn delete_already_deleted_key() -> Result<(), ToyKVError> {
 #[test]
 fn overwrite_same_key_multiple_times() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     // Overwrite many times -- ensure in sstables
     for i in 0..2500 {
@@ -453,7 +475,10 @@ fn overwrite_same_key_multiple_times() -> Result<(), ToyKVError> {
 #[test]
 fn wal_threshold_boundary() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     // Write exactly 999 items (one less than threshold)
     for i in 0..999 {
@@ -491,7 +516,10 @@ fn scan_empty_database() -> Result<(), ToyKVError> {
 #[test]
 fn scan_database_with_only_deleted_items() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     // Add some items then delete them all
     for i in 0..2500 {
@@ -515,7 +543,10 @@ fn scan_database_with_only_deleted_items() -> Result<(), ToyKVError> {
 fn scan_returns_correct_values() -> Result<(), ToyKVError> {
     let n_items = 2500;
     let tmp_dir = tempfile::tempdir().unwrap();
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     let mut keys = vec![];
     let mut values = vec![];
@@ -598,7 +629,10 @@ fn persistence_after_restart_with_deletes() -> Result<(), ToyKVError> {
 #[test]
 fn mixed_operations_across_sstable_flushes() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
 
     // First batch - will be in SSTable after flush
     for i in 0..1000 {
@@ -654,7 +688,10 @@ fn operations_with_large_batch_across_restart() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
     {
-        let mut db = toykv::with_sync(tmp_dir.path(), WALSync::Off)?;
+        let mut db = ToyKVBuilder::new()
+            .wal_sync(WALSync::Off)
+            .wal_write_threshold(1000)
+            .open(tmp_dir.path())?;
 
         // Write 5000 items to ensure multiple SSTable flushes
         for i in 0..5000 {
