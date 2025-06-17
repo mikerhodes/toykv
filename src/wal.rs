@@ -46,7 +46,7 @@ pub(crate) struct WAL {
     nextseq: u32,
 
     /// Number of writes to the WAL since it created
-    pub(crate) wal_writes: u32,
+    pub(crate) wal_writes: u64,
 }
 
 pub(crate) fn new(d: &Path, sync: WALSync) -> WAL {
