@@ -189,7 +189,7 @@ fn operations_blocked_after_shutdown() -> Result<(), ToyKVError> {
     }
 
     let mut cnt = 0;
-    for _ in db.scan()? {
+    for _ in db.scan(None)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
@@ -209,6 +209,9 @@ fn operations_blocked_after_shutdown() -> Result<(), ToyKVError> {
 fn scan() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
+    // emits i as byte array maintaining ordering
+    let ordered_bytes = |i: i64| (i as u64 ^ (1u64 << 63)).to_be_bytes();
+
     let writes = 2500i64;
 
     let mut db = ToyKVBuilder::new()
@@ -217,17 +220,77 @@ fn scan() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     for n in 1..(writes + 1) {
-        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
+        match db.set(ordered_bytes(n).to_vec(), n.to_le_bytes().to_vec()) {
             Ok(it) => it,
             Err(err) => return Err(err),
         };
     }
 
     let mut cnt = 0;
-    for _ in db.scan()? {
+    for _ in db.scan(None)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
+
+    let mut cnt = 0;
+    for _ in db.scan(Some(ordered_bytes(500).as_slice()))? {
+        cnt += 1;
+    }
+    assert_eq!(cnt, writes - 499); // 499 as 500 is in result set
+
+    let mut cnt = 0;
+    for _ in db.scan(Some(ordered_bytes(2499).as_slice()))? {
+        cnt += 1;
+    }
+    assert_eq!(cnt, 2); // 2 => 2499, 2500
+
+    let mut cnt = 0;
+    for _ in db.scan(Some(ordered_bytes(-1400).as_slice()))? {
+        cnt += 1;
+    }
+    assert_eq!(cnt, writes);
+
+    db.shutdown();
+
+    Ok(())
+}
+
+#[test]
+fn scan_seek_key_check_next() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    // emits i as byte array maintaining ordering
+    let ordered_bytes = |i: i64| (i as u64 ^ (1u64 << 63)).to_be_bytes();
+
+    let writes = 2500i64;
+
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(WALSync::Off)
+        .wal_write_threshold(1000)
+        .open(tmp_dir.path())?;
+
+    for n in 1..(writes + 1) {
+        match db.set(ordered_bytes(n).to_vec(), n.to_le_bytes().to_vec()) {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
+    }
+
+    // check the first keys
+    let mut it = db.scan(Some(&[0]))?;
+    assert_eq!(it.next().unwrap().unwrap().key, ordered_bytes(1));
+    it = db.scan(Some(ordered_bytes(-1400).as_slice()))?;
+    assert_eq!(it.next().unwrap().unwrap().key, ordered_bytes(1));
+    it = db.scan(Some(ordered_bytes(1500).as_slice()))?;
+    assert_eq!(it.next().unwrap().unwrap().key, ordered_bytes(1500));
+    it = db.scan(Some(ordered_bytes(123).as_slice()))?;
+    assert_eq!(it.next().unwrap().unwrap().key, ordered_bytes(123));
+    it = db.scan(Some(ordered_bytes(writes * 2).as_slice()))?;
+    assert!(it.next().is_none());
+    it = db.scan(Some(&[255]))?;
+    assert!(it.next().is_none());
+
+    drop(it);
 
     db.shutdown();
 
@@ -256,10 +319,15 @@ fn scan_on_reopen() -> Result<(), ToyKVError> {
 
     let db2 = toykv::open(tmp_dir.path())?;
     let mut cnt = 0;
-    for _ in db2.scan()? {
+    for _ in db2.scan(None)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
+    let mut cnt = 0;
+    for _ in db2.scan(Some((500 as i64).to_be_bytes().as_slice()))? {
+        cnt += 1;
+    }
+    assert_eq!(cnt, writes - 499); // 499 as 500 is in result set
 
     Ok(())
 }
@@ -286,7 +354,7 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
     }
 
     let mut cnt = 0;
-    for _ in db.scan()? {
+    for _ in db.scan(None)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes / 2);
@@ -295,7 +363,7 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
 
     let db2 = toykv::open(tmp_dir.path())?;
     cnt = 0;
-    for _ in db2.scan()? {
+    for _ in db2.scan(None)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes / 2);
@@ -505,7 +573,7 @@ fn scan_empty_database() -> Result<(), ToyKVError> {
     let db = toykv::open(tmp_dir.path())?;
 
     let mut count = 0;
-    for _ in db.scan()? {
+    for _ in db.scan(None)? {
         count += 1;
     }
     assert_eq!(count, 0);
@@ -531,7 +599,7 @@ fn scan_database_with_only_deleted_items() -> Result<(), ToyKVError> {
     }
 
     let mut count = 0;
-    for _ in db.scan()? {
+    for _ in db.scan(None)? {
         count += 1;
     }
     assert_eq!(count, 0);
@@ -559,7 +627,7 @@ fn scan_returns_correct_values() -> Result<(), ToyKVError> {
         db.set(keys[i].clone(), values[i].clone())?;
     }
 
-    let mut items: Vec<_> = db.scan()?.collect::<Result<Vec<_>, _>>()?;
+    let mut items: Vec<_> = db.scan(None)?.collect::<Result<Vec<_>, _>>()?;
     items.sort_by(|a, b| a.key.cmp(&b.key));
 
     assert_eq!(items.len(), n_items);
@@ -595,7 +663,7 @@ fn key_ordering_edge_cases() -> Result<(), ToyKVError> {
     }
 
     // Scan should return in lexicographic order
-    let scanned: Vec<_> = db.scan()?.collect::<Result<Vec<_>, _>>()?;
+    let scanned: Vec<_> = db.scan(None)?.collect::<Result<Vec<_>, _>>()?;
 
     for (i, expected_key) in keys.iter().enumerate() {
         assert_eq!(scanned[i].key, expected_key.as_bytes());
