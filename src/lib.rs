@@ -198,19 +198,39 @@ impl ToyKV {
     // /// Immediately terminate (for use during testing, "pretend to crash")
     // pub(crate) fn terminate(&mut self) {}
 
-    pub fn scan<'a>(&'a self) -> Result<KVIterator<'a>, Error> {
+    pub fn scan<'a>(
+        &'a self,
+        start_key: Option<&[u8]>,
+    ) -> Result<KVIterator<'a>, Error> {
         let mut m = MergeIterator::<'a>::new();
-        m.add_iterator(self.memtable.iter().map(
-            |(key, value)| -> Result<KVRecord, Error> {
-                Ok(KVRecord {
-                    key: key.clone(),
-                    value: value.clone(),
-                })
-            },
-        ));
-        for t in self.sstables.iters()? {
+
+        // Add memtable(s) to the merge iterator
+        fn map_fun(
+            (key, value): (&Vec<u8>, &KVValue),
+        ) -> Result<KVRecord, Error> {
+            Ok(KVRecord {
+                key: key.clone(),
+                value: value.clone(),
+            })
+        }
+        if let Some(k) = start_key {
+            let r = self.memtable.range(k.to_vec()..);
+            m.add_iterator(r.map(map_fun));
+        } else {
+            m.add_iterator(self.memtable.iter().map(map_fun));
+        }
+
+        // Add sstables to the merge iterator
+        let mut iters = self.sstables.iters()?;
+        if let Some(k) = start_key {
+            for t in &mut iters {
+                t.seek_to_key(k);
+            }
+        }
+        for t in iters.into_iter() {
             m.add_iterator(t);
         }
+
         Ok(KVIterator { i: m })
     }
 }
