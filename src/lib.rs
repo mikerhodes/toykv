@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io::Error, path::Path};
+use std::{collections::BTreeMap, io::Error, ops::Bound, path::Path};
 
 use error::ToyKVError;
 use kvrecord::{KVRecord, KVValue};
@@ -200,9 +200,10 @@ impl ToyKV {
 
     pub fn scan<'a>(
         &'a self,
-        start_key: Option<&[u8]>,
+        start_key: Option<&'a [u8]>,
+        end_key: Bound<&'a [u8]>,
     ) -> Result<KVIterator<'a>, Error> {
-        let mut m = MergeIterator::<'a>::new();
+        let mut m = MergeIterator::<'a>::new(end_key);
 
         // Add memtable(s) to the merge iterator
         fn map_fun(
@@ -224,7 +225,7 @@ impl ToyKV {
         let mut iters = self.sstables.iters()?;
         if let Some(k) = start_key {
             for t in &mut iters {
-                t.seek_to_key(k);
+                t.seek_to_key(k)?;
             }
         }
         for t in iters.into_iter() {

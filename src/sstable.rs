@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, DirEntry, File, OpenOptions},
     io::{BufReader, Error, Seek, SeekFrom, Write},
+    ops::Bound,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -394,7 +395,7 @@ impl SSTablesReader {
     }
 
     fn scan(&mut self) -> MergeIterator {
-        let mut m = MergeIterator::new();
+        let mut m = MergeIterator::new(Bound::Unbounded);
         for t in &self.tables {
             m.add_iterator(t.duplicate());
         }
