@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::sync::Arc;
+use std::{ops::Bound, sync::Arc};
 
 use crate::{
     block::{Block, Entry},
@@ -18,7 +18,10 @@ impl BlockIterator {
         }
     }
 
-    fn create_and_seek_to_key(b: Arc<Block>, k: &[u8]) -> BlockIterator {
+    pub(crate) fn create_and_seek_to_key(
+        b: Arc<Block>,
+        bound_key: Bound<&[u8]>,
+    ) -> BlockIterator {
         // Run the iteration loop manually so we can avoid
         // copying data more than needed. We could avoid
         // the copying during Entry::decode if we were willing
@@ -31,8 +34,13 @@ impl BlockIterator {
                 Some(e) => e,
             };
 
-            if &e.key[..] >= k {
-                break;
+            // Break if we've hit the bound
+            match bound_key {
+                Bound::Unbounded => {}
+                Bound::Included(k) if &e.key[..] >= k => break,
+                Bound::Included(_) => {}
+                Bound::Excluded(k) if &e.key[..] > k => break,
+                Bound::Excluded(_) => {}
             }
 
             i += 1;
@@ -513,20 +521,34 @@ mod tests {
 
         let block = Arc::new(builder.build());
 
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"key001");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"key001"),
+        );
         let first = it.next().unwrap();
         assert_eq!(first.key, b"key001");
-        it = BlockIterator::create_and_seek_to_key(block.clone(), b"key010");
+        it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"key010"),
+        );
         let first = it.next().unwrap();
         assert_eq!(first.key, b"key010");
-        it = BlockIterator::create_and_seek_to_key(block.clone(), b"key049");
+        it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"key049"),
+        );
         let first = it.next().unwrap();
         assert_eq!(first.key, b"key049");
-        it = BlockIterator::create_and_seek_to_key(block.clone(), b"aaa");
+        it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"aaa"),
+        );
         let first = it.next().unwrap();
         assert_eq!(first.key, b"key000");
-        it = BlockIterator::create_and_seek_to_key(block.clone(), b"zzz");
+        it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"zzz"),
+        );
         assert_eq!(it.next(), None);
     }
 
@@ -535,10 +557,15 @@ mod tests {
         // Test that iterator state is maintained across partial consumption
         let builder = BlockBuilder::new();
         let block = Arc::new(builder.build());
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"aaa");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"aaa"),
+        );
         assert_eq!(it.next(), None);
-        it = BlockIterator::create_and_seek_to_key(block.clone(), b"zzz");
+        it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"zzz"),
+        );
         assert_eq!(it.next(), None);
     }
 
@@ -550,7 +577,8 @@ mod tests {
         builder.add(b"b", &KVWriteValue::Some(b"2")).unwrap();
         let block = Arc::new(builder.build());
 
-        let mut it = BlockIterator::create_and_seek_to_key(block, b"");
+        let mut it =
+            BlockIterator::create_and_seek_to_key(block, Bound::Included(b""));
         let first = it.next().unwrap();
         assert_eq!(first.key, b"a"); // Should position at first key
     }
@@ -573,14 +601,16 @@ mod tests {
         // Test seeking to keys with null bytes
         let mut it = BlockIterator::create_and_seek_to_key(
             block.clone(),
-            b"a_before\x00",
+            Bound::Included(b"a_before\x00"),
         );
         let result = it.next().unwrap();
         assert_eq!(result.key, b"a_before\x00key");
 
         // Test seeking to exact null byte sequences
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block, b"b_normal\x00");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block,
+            Bound::Included(b"b_normal\x00"),
+        );
         let result = it.next().unwrap();
         assert_eq!(result.key, b"b_normal_key");
     }
@@ -599,30 +629,43 @@ mod tests {
         let block = Arc::new(builder.build());
 
         // Prefix first key
-        let mut it = BlockIterator::create_and_seek_to_key(block.clone(), b"k");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"k"),
+        );
         assert_eq!(it.next().unwrap().key, b"key");
         // Prefix plus lower-than content
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"kaaaaaaa");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"kaaaaaaa"),
+        );
         assert_eq!(it.next().unwrap().key, b"key");
         // Prefix key middle
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"key_");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"key_"),
+        );
         assert_eq!(it.next().unwrap().key, b"key_extended");
         let mut it = BlockIterator::create_and_seek_to_key(
             block.clone(),
-            b"key_extendeda",
+            Bound::Included(b"key_extendeda"),
         );
         assert_eq!(it.next().unwrap().key, b"key_more");
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"key_m");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"key_m"),
+        );
         assert_eq!(it.next().unwrap().key, b"key_more");
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"key_a");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"key_a"),
+        );
         assert_eq!(it.next().unwrap().key, b"key_extended");
         // Longer/higher than last key
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"key_morea");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"key_morea"),
+        );
         assert_eq!(it.next(), None);
     }
 
@@ -637,16 +680,22 @@ mod tests {
         let block = Arc::new(builder.build());
 
         // Should find exact matches and next greater for non-matches
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"aaa");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"aaa"),
+        );
         assert_eq!(it.next().unwrap().key, b"aaa");
 
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"aaa\x01");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"aaa\x01"),
+        );
         assert_eq!(it.next().unwrap().key, b"aab");
 
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"aa\xff");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"aa\xff"),
+        );
         assert_eq!(it.next().unwrap().key, b"aba");
     }
 
@@ -672,17 +721,22 @@ mod tests {
         let block = Arc::new(builder.build());
 
         // Test seeking to various extreme values
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"\x00");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"\x00"),
+        );
         assert_eq!(it.next().unwrap().key, b"\x00\x00\x00");
 
         let mut it = BlockIterator::create_and_seek_to_key(
             block.clone(),
-            b"\xff\xff\xff\xff",
+            Bound::Included(b"\xff\xff\xff\xff"),
         );
         assert_eq!(it.next(), None); // Should be past end
 
-        let mut it = BlockIterator::create_and_seek_to_key(block, b"\x80");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block,
+            Bound::Included(b"\x80"),
+        );
         assert_eq!(it.next().unwrap().key, b"\x80\x80\x80");
     }
 
@@ -698,10 +752,10 @@ mod tests {
 
         // Multiple seeks should be independent
         let it = |x| BlockIterator::create_and_seek_to_key(block.clone(), x);
-        let mut it1 = it(b"banana");
-        let mut it2 = it(b"apple");
-        let mut it3 = it(b"cherry");
-        let mut it4 = it(b"banana");
+        let mut it1 = it(Bound::Included(b"banana"));
+        let mut it2 = it(Bound::Included(b"apple"));
+        let mut it3 = it(Bound::Included(b"cherry"));
+        let mut it4 = it(Bound::Included(b"banana"));
 
         assert_eq!(it1.next().unwrap().key, b"banana");
         assert_eq!(it2.next().unwrap().key, b"apple");
@@ -733,8 +787,10 @@ mod tests {
         let block = Arc::new(builder.build());
 
         // Seek to deleted key
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block.clone(), b"a_deleted1");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block.clone(),
+            Bound::Included(b"a_deleted1"),
+        );
         let result = it.next().unwrap();
         assert_eq!(result.key, b"a_deleted1");
         assert_eq!(result.value, KVValue::Deleted);
@@ -742,8 +798,10 @@ mod tests {
         assert_eq!(result.key, b"b_alive2");
 
         // Seek between live and deleted
-        let mut it =
-            BlockIterator::create_and_seek_to_key(block, b"b_alive2\xff");
+        let mut it = BlockIterator::create_and_seek_to_key(
+            block,
+            Bound::Included(b"b_alive2\xff"),
+        );
         assert_eq!(it.next().unwrap().key, b"b_deleted2");
     }
 
@@ -762,9 +820,9 @@ mod tests {
         let it = |x| BlockIterator::create_and_seek_to_key(block.clone(), x);
         {
             // Create multiple iterators from same block
-            let _it1 = it(b"memory");
-            let _it2 = it(b"ref");
-            let _it3 = it(b"nonexistent");
+            let _it1 = it(Bound::Included(b"memory"));
+            let _it2 = it(Bound::Included(b"ref"));
+            let _it3 = it(Bound::Included(b"nonexistent"));
 
             // Reference count should increase appropriately
             assert!(Arc::strong_count(&block) > original_strong_count);
