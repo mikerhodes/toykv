@@ -9,6 +9,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{BufReader, Error, Read, Seek, SeekFrom},
+    ops::Bound,
     path::PathBuf,
     sync::Arc,
 };
@@ -25,7 +26,6 @@ pub(crate) struct TableIterator {
     // current block
     bi: BlockIterator,
     b_idx: usize,
-    seek_key: Option<Vec<u8>>,
 }
 
 impl TableIterator {
@@ -43,7 +43,6 @@ impl TableIterator {
             bm,
             bi: BlockIterator::create(first_block),
             b_idx: 0,
-            seek_key: None,
         })
     }
 
@@ -93,6 +92,10 @@ impl TableIterator {
     /// the first entry with key, or the entry following where
     /// key would be.
     pub(crate) fn seek_to_key(&mut self, key: &[u8]) -> Result<(), Error> {
+        // TODO Use Bound for key to seek to. I wonder if it's easier
+        // when using excluded start key to instead bump the key up
+        // to the next value by incrementing the last byte. No,
+        // because it's a slice and we'd edit the key!
         // https://skyzh.github.io/mini-lsm/week1-04-sst.html#task-2-sst-iterator
         // In the doc it says to just use the start key. I think that means
         // you have to check the start key of the following block rather
@@ -107,8 +110,6 @@ impl TableIterator {
             // All keys are greater than a null key
             return self.rewind();
         }
-
-        let key = Vec::from(key);
 
         let mut left = 0;
         let mut right = self.bm.len() - 1;
@@ -132,16 +133,16 @@ impl TableIterator {
             // TODO key is after last in table? Do we have a test?
             // Probably should get some edge case tests written.
 
-            if key < bm.first_key && cut == 0 {
+            if key < &bm.first_key[..] && cut == 0 {
                 // key is earlier than first key in table, break
                 break;
-            } else if key < bm.first_key {
+            } else if key < &bm.first_key[..] {
                 // take the left half
                 right = cut - 1;
-            } else if key >= bm.first_key && key < bm_next.first_key {
+            } else if key >= &bm.first_key[..] && key < &bm_next.first_key[..] {
                 // Check whether the key falls between this block and
                 // the next, if so, start at the next.
-                if key > bm.last_key {
+                if key > &bm.last_key[..] {
                     cut += 1;
                 }
                 break;
@@ -153,11 +154,10 @@ impl TableIterator {
 
         // position tableiterator at selected block
         self.b_idx = cut;
-        self.bi = BlockIterator::create(TableIterator::load_block(
-            &mut self.f,
-            &self.bm[cut],
-        )?);
-        self.seek_key = Some(key);
+        self.bi = BlockIterator::create_and_seek_to_key(
+            TableIterator::load_block(&mut self.f, &self.bm[cut])?,
+            Bound::Included(&key[..]),
+        );
 
         Ok(())
     }
@@ -207,16 +207,6 @@ impl Iterator for TableIterator {
             let next_record = self.bi.next();
 
             if let Some(x) = next_record {
-                // If there is a seek key, skip keys that are less
-                // than the seek key. Otherwise, start returning
-                // keys, and None the seek_key as we are past it.
-                if let Some(seek_key) = &self.seek_key {
-                    if &x.key < seek_key {
-                        continue;
-                    } else {
-                        self.seek_key = None;
-                    }
-                }
                 return Some(Ok(x));
             }
 
