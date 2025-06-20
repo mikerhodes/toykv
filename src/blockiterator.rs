@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+use core::panic;
 use std::{ops::Bound, sync::Arc};
 
 use crate::{
@@ -28,22 +29,27 @@ impl BlockIterator {
         // to peek directly into the block data, but that's
         // a quest for another day.
         let mut i = 0;
-        while i < b.offsets.len() {
-            let e = match BlockIterator::entry_at_index(&b, i) {
-                None => break,
-                Some(e) => e,
-            };
 
-            // Break if we've hit the bound
-            match bound_key {
-                Bound::Unbounded => {}
-                Bound::Included(k) if &e.key[..] >= k => break,
-                Bound::Included(_) => {}
-                Bound::Excluded(k) if &e.key[..] > k => break,
-                Bound::Excluded(_) => {}
+        // Unbounded means no bound, seek to start.
+        // So only seek if it's not Unbounded.
+        if bound_key != Bound::Unbounded {
+            while i < b.offsets.len() {
+                let e = match BlockIterator::entry_at_index(&b, i) {
+                    None => break,
+                    Some(e) => e,
+                };
+
+                // Break if we've hit the bound
+                match bound_key {
+                    Bound::Unbounded => panic!("Unreachable"),
+                    Bound::Included(k) if &e.key[..] >= k => break,
+                    Bound::Included(_) => {}
+                    Bound::Excluded(k) if &e.key[..] > k => break,
+                    Bound::Excluded(_) => {}
+                }
+
+                i += 1;
             }
-
-            i += 1;
         }
 
         // If the key isn't in the block, idx will be at the end
