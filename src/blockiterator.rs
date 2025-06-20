@@ -19,53 +19,58 @@ impl BlockIterator {
     }
 
     fn create_and_seek_to_key(b: Arc<Block>, k: &[u8]) -> BlockIterator {
-        let it = BlockIterator {
-            b: b.clone(),
-            curr_offset_idx: 0,
-        };
-        // use this iterator to find the offset idx for the first key
-        // yes this is pretty inefficient what with copying key and value :(
-        // It's probably not that much work to add a method that reads the
-        // key at an offset and uses that here instead, once we have the
-        // tests. (But it will break the "entry" abstraction, maybe we
-        // can have a borrow-decode that gives you byte slices).
-        let mut idx = 0;
-        for b in it {
-            if &b.key[..] >= k {
+        // Run the iteration loop manually so we can avoid
+        // copying data more than needed. We could avoid
+        // the copying during Entry::decode if we were willing
+        // to peek directly into the block data, but that's
+        // a quest for another day.
+        let mut i = 0;
+        while i < b.offsets.len() {
+            let e = match BlockIterator::entry_at_index(&b, i) {
+                None => break,
+                Some(e) => e,
+            };
+
+            if &e.key[..] >= k {
                 break;
             }
-            idx += 1;
+
+            i += 1;
         }
 
         // If the key isn't in the block, idx will be at the end
         // so next() will return None.
         BlockIterator {
             b,
-            curr_offset_idx: idx,
+            curr_offset_idx: i,
         }
     }
-}
-impl Iterator for BlockIterator {
-    type Item = KVRecord;
 
-    fn next(&mut self) -> Option<Self::Item> {
+    fn entry_at_index(blk: &Arc<Block>, idx: usize) -> Option<Entry> {
         // There is an entry between each index in the
         // offsets array, so we need to decode an entry
         // from the data slice for each offset, until
         // we get to the end.
-        let start = match self.b.offsets.get(self.curr_offset_idx) {
+        let start = match blk.offsets.get(idx) {
             Some(o) => *o as usize,
             None => return None, // run off the end of offsets, we're done
         };
-        let end = match self.b.offsets.get(self.curr_offset_idx + 1) {
+        let end = match blk.offsets.get(idx + 1) {
             Some(o) => *o as usize,
-            None => self.b.data.len(), // last entry, read to end of data
+            None => blk.data.len(), // last entry, read to end of data
         };
-        let entry_bytes: &[u8] = &self.b.data[start..end];
+        let entry_bytes: &[u8] = &blk.data[start..end];
         let e = Entry::decode(entry_bytes);
+        Some(e)
+    }
+}
 
+impl Iterator for BlockIterator {
+    type Item = KVRecord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let e = BlockIterator::entry_at_index(&self.b, self.curr_offset_idx)?;
         self.curr_offset_idx += 1;
-
         Some(KVRecord {
             key: e.key,
             value: if e.value.len() > 0 {
