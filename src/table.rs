@@ -108,7 +108,7 @@ impl SSTablesReader {
         // on disk. Read each to find k. If no SSTable file contains
         // k, return None.
         for t in self.tables.as_mut_slice() {
-            dbg!("t in tables");
+            // dbg!("t in tables");
             t.seek_to_key(k)?;
             match t.next() {
                 Some(Ok(v)) if v.key == k => return Ok(Some(v.value)),
