@@ -10,7 +10,7 @@ fn main() -> Result<(), ToyKVError> {
     let now = Instant::now();
     let mut db = ToyKVBuilder::new()
         .wal_sync(toykv::WALSync::Off)
-        .wal_write_threshold(1000)
+        .wal_write_threshold(10000)
         .open(tmp_dir.path())?;
     let elapsed_time = now.elapsed();
     println!(
