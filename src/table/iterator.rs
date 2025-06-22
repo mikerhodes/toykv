@@ -58,7 +58,7 @@ impl TableIterator {
         let bm_end_offset = f.seek(SeekFrom::End(-4))?;
         f.read_exact(&mut u32bytebuf)?;
         let bm_start_offset = u32::from_be_bytes(u32bytebuf);
-        println!("bm_start_offset {}", bm_start_offset);
+        // dbg!(bm_start_offset);
 
         f.seek(SeekFrom::Start(bm_start_offset as u64))?;
 

@@ -1,14 +1,17 @@
 use std::time::Instant;
 
-use toykv::error::ToyKVError;
+use toykv::{error::ToyKVError, ToyKVBuilder};
 
 fn main() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
-    let writes = 2500u32;
+    let writes = 25000u32;
 
     let now = Instant::now();
-    let mut db = toykv::open(tmp_dir.path())?;
+    // let mut db = toykv::open(tmp_dir.path())?;
+    let mut db = ToyKVBuilder::new()
+        .wal_sync(toykv::WALSync::Off)
+        .open(tmp_dir.path())?;
     let elapsed_time = now.elapsed();
     println!(
         "Running open() took {}ms.",

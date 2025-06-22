@@ -75,11 +75,11 @@ impl TableBuilder {
             ));
         }
 
-        println!(
-            "file stats: data len {}, metadata len {}",
-            self.data.len(),
-            self.metadata.len()
-        );
+        // println!(
+        //     "file stats: data len {}, metadata len {}",
+        //     self.data.len(),
+        //     self.metadata.len()
+        // );
 
         let mut f = File::create(p)?;
         f.write(&self.data)?;
