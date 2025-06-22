@@ -49,10 +49,7 @@ impl KVRecord {
         r: &mut T,
     ) -> Result<Option<KVRecord>, Error> {
         let mut header = [0u8; 9];
-        let n = r.read(&mut header)?;
-        if n < 9 {
-            return Ok(None);
-        }
+        r.read_exact(&mut header)?;
 
         // This might be clearer using byteorder and a reader
         assert_eq!(header[0], KV_MAGIC, "Unexpected magic byte");

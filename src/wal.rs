@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{BufReader, Error, Read, Write},
+    io::{BufReader, Error, Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
@@ -86,12 +86,24 @@ impl WAL {
             Err(e) => return Err(e.into()),
         };
 
-        // A somewhat large buffer as we expect these files to be quite large.
+        let size = fs::metadata(self.wal_path.as_path())?.len();
+        // dbg!(size);
+
+        if size == 0 {
+            // New WAL file, nothing to replay
+            self.f = Some(file);
+            return Ok(memtable);
+        }
+
+        // 256k buffer covers at least one max size record.
         let mut bytes = BufReader::with_capacity(256 * 1024, &file);
 
         let mut cnt = 0;
-        loop {
+        let mut last_read_seq = 0;
+        while bytes.stream_position()? < size {
+            dbg!(bytes.stream_position()?);
             let rec = WALRecord::read_one(&mut bytes)?;
+            // dbg!(&rec);
             match rec {
                 Some(wr) => {
                     if wr.seq != self.nextseq {
@@ -102,6 +114,7 @@ impl WAL {
                     }
                     assert_eq!(wr.op, OP_SET, "Unexpected op code");
                     memtable.insert(wr.key, wr.value);
+                    last_read_seq = wr.seq;
                     self.nextseq = wr.seq + 1;
                     self.wal_writes += 1;
                     cnt += 1;
@@ -111,8 +124,8 @@ impl WAL {
         }
 
         println!(
-            "Replayed {} records from WAL. nextseq={}.",
-            cnt, self.nextseq
+            "Replayed {} records from WAL. last_read_seq={}.",
+            cnt, last_read_seq
         );
 
         self.f = Some(file);
@@ -131,6 +144,7 @@ impl WAL {
         }
 
         let seq = self.nextseq;
+        // dbg!(seq);
 
         let file = self.f.as_mut().unwrap();
         WALRecord::write_one(file, seq, key, value)?;
@@ -139,6 +153,8 @@ impl WAL {
         if self.sync == WALSync::Full {
             file.sync_all()?;
         }
+
+        // dbg!(self.wal_writes);
 
         self.nextseq += 1;
 
@@ -157,6 +173,9 @@ impl WAL {
         if self.f.is_none() {
             return Err(ToyKVError::BadWALState);
         }
+
+        let file = self.f.as_mut().unwrap();
+        file.sync_all()?;
 
         // Drop our writer so it closes
         self.f = None;
@@ -190,12 +209,7 @@ impl WALRecord {
     /// Read a single WAL record from a WAL file (or other Read struct).
     fn read_one<T: Read>(r: &mut T) -> Result<Option<WALRecord>, Error> {
         let mut header = [0u8; 6];
-        let n = r.read(&mut header)?;
-        if n < 6 {
-            // Is this really only Ok if we read zero?
-            // 0 < n < 6 probably actually means a corrupt file.
-            return Ok(None);
-        }
+        r.read_exact(&mut header)?;
 
         // This might be clearer using byteorder and a reader
         let magic = header[0];
