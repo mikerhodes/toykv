@@ -6,7 +6,7 @@
 // | data block | ... |          metadata         | meta block offset (u32) |
 // --------------------------------------------------------------------------
 
-use std::{fs::File, io::Write, mem, path::Path};
+use std::{fs::File, io::Write, mem, path::Path, time::Instant};
 
 use crate::{
     block::{BlockBuilder, BlockBuilderError},
@@ -25,6 +25,8 @@ pub(crate) struct TableBuilder {
     data: Vec<u8>,
     /// metadata blocks
     metadata: Vec<u8>,
+    /// start time for builder
+    start: Instant,
 }
 impl TableBuilder {
     pub(super) fn new() -> TableBuilder {
@@ -34,6 +36,7 @@ impl TableBuilder {
             last_key: None,
             data: vec![],
             metadata: vec![],
+            start: Instant::now(),
         }
     }
     pub(super) fn add(
@@ -87,6 +90,10 @@ impl TableBuilder {
         f.write(&(self.data.len() as u32).to_be_bytes())?; // metadata offset
         f.flush()?;
         f.sync_all()?;
+
+        let elapsed_time = self.start.elapsed();
+        println!("Writing sstable took {}ms.", elapsed_time.as_millis());
+
         Ok(())
     }
 
