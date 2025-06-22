@@ -818,3 +818,92 @@ fn operations_with_large_batch_across_restart() -> Result<(), ToyKVError> {
 
     Ok(())
 }
+
+#[test]
+fn test_11397_wal_records_bug() -> Result<(), ToyKVError> {
+    // This is a regression test for a case where I called
+    // `read` instead of `read_exact` in KVRecord to read
+    // the header of a WAL entry. After 11397 records (of
+    // a particular size, as below, presumably), `read`
+    // consistently didn't read the whole header even though
+    // it was in the file. The way the error case was written
+    // caused this to stop reading the file but not report
+    // an error to the caller.
+    //
+    // Unclear why the read returned fewer bytes at this
+    // exact point, but using `read_exact` will continue
+    // reading if it has an error. Presumably there was a
+    // page fault or something that caused `read` to return
+    // early.
+    //
+    // I happened to spot this during benchmarking where I was
+    // trying out different wal write threshold values.
+    //
+    // Git commit where this was found: e751a95 but it was
+    // lurking ever since the WAL was written.
+    //
+    // Replayed 0 records from WAL. nextseq=0.
+    // Running open() took 0.303ms.
+    // Writing sstable took 20ms.
+    // Running write() took 121ms.
+    // Running read() 23900 times took 942ms (0.039ms per read).
+    // Replayed 11397 records from WAL. nextseq=11397.
+    // thread 'main' panicked at examples/bench.rs:58:17:
+    // called `Option::unwrap()` on a `None` value
+
+    // First confirm that 11397 is the threshold with a success run
+    {
+        let writes = 11397u32;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut db = ToyKVBuilder::new()
+            .wal_sync(toykv::WALSync::Off)
+            .wal_write_threshold(12000)
+            .open(tmp_dir.path())?;
+
+        for n in 1..(writes + 1) {
+            db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec())?
+        }
+        db.shutdown();
+
+        // See how read time is affected if we open a new database
+        let mut db = toykv::open(tmp_dir.path())?;
+        for n in 1..(writes + 1) {
+            let got = db.get(n.to_be_bytes().as_slice())?;
+            assert_eq!(
+                got.unwrap(),
+                n.to_le_bytes().as_slice(),
+                "Did not read back what we put in"
+            );
+        }
+    }
+
+    // Now test a "too large" version
+    {
+        let writes = 11398u32;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut db = ToyKVBuilder::new()
+            .wal_sync(toykv::WALSync::Off)
+            .wal_write_threshold(12000)
+            .open(tmp_dir.path())?;
+
+        for n in 1..(writes + 1) {
+            db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec())?
+        }
+        db.shutdown();
+
+        // See how read time is affected if we open a new database
+        let mut db = toykv::open(tmp_dir.path())?;
+        for n in 1..(writes + 1) {
+            let got = db.get(n.to_be_bytes().as_slice())?;
+            assert_eq!(
+                got.unwrap(),
+                n.to_le_bytes().as_slice(),
+                "Did not read back what we put in"
+            );
+        }
+    }
+
+    Ok(())
+}
