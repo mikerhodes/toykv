@@ -8,32 +8,38 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, DirEntry},
     io::{Cursor, Error, Read},
+    iter::repeat_with,
     path::{Path, PathBuf},
 };
 
 use builder::TableBuilder;
 use iterator::TableIterator;
+use tableindex::SSTableIndex;
 
 use crate::kvrecord::KVValue;
 
 mod builder;
 mod iterator;
+mod tableindex;
 
 /// Manage and search a set of SSTable files on disk.
 pub(crate) struct SSTables {
     d: PathBuf,
+    sstables_index: SSTableIndex,
     sstables: SSTablesReader,
 }
 
 impl SSTables {
     /// Create a new SSTables whose files live in the directory d.
     pub(crate) fn new(d: &Path) -> Result<SSTables, Error> {
-        let files = sorted_sstable_files(d)?;
+        let index_path = d.join("sstable_index.json");
+        let sstables_index = SSTableIndex::open(index_path)?;
+        let files = sstables_index.levels.l0.clone();
         let sstables = SSTablesReader::new(files)?;
         Ok(SSTables {
             d: d.to_path_buf(),
+            sstables_index,
             sstables,
         })
     }
@@ -46,7 +52,7 @@ impl SSTables {
         &mut self,
         memtable: &BTreeMap<Vec<u8>, KVValue>,
     ) -> Result<(), Error> {
-        let fname = next_sstable_fname(self.d.as_path())?;
+        let fname = next_sstable_fname(self.d.as_path());
 
         let mut sst = TableBuilder::new();
         for entry in memtable {
@@ -54,10 +60,13 @@ impl SSTables {
         }
         sst.write(fname.as_path())?;
 
-        // Add new table to the snapshot of tables we are
-        // reading from.
-        let files = sorted_sstable_files(self.d.as_path())?;
-        self.sstables = SSTablesReader::new(files)?;
+        // Commit the new sstable to the index.
+        self.sstables_index.levels.l0.insert(0, fname);
+        self.sstables_index.write()?;
+
+        // Load new SSTablesReader for the new state.
+        self.sstables =
+            SSTablesReader::new(self.sstables_index.levels.l0.clone())?;
 
         Ok(())
     }
@@ -69,10 +78,9 @@ impl SSTables {
     }
 
     pub(crate) fn iters(&self) -> Result<Vec<TableIterator>, Error> {
-        let files = sorted_sstable_files(self.d.as_path())?;
         let mut vec = vec![];
-        for t in files {
-            let it = TableIterator::new(t.path())?;
+        for table_path in &self.sstables_index.levels.l0 {
+            let it = TableIterator::new(table_path.clone())?;
             vec.push(it);
         }
         Ok(vec)
@@ -93,10 +101,10 @@ impl SSTablesReader {
     /// Create a new SSTableFileReader that is able to search
     /// for keys in the Vec of sstable files, organised newest
     /// to oldest.
-    fn new(sstable_files: Vec<DirEntry>) -> Result<SSTablesReader, Error> {
+    fn new(sstable_files: Vec<PathBuf>) -> Result<SSTablesReader, Error> {
         let mut tables: Vec<TableIterator> = vec![];
         for p in sstable_files {
-            tables.push(TableIterator::new(p.path())?);
+            tables.push(TableIterator::new(p)?);
         }
         Ok(SSTablesReader { tables })
     }
@@ -121,132 +129,9 @@ impl SSTablesReader {
     }
 }
 
-fn next_sstable_fname(dir: &Path) -> Result<PathBuf, Error> {
-    // So basically here we have to read 00000001.data etc and find the
-    // greatest number we have so far, then create a path that is inc that
-    // number by one.
-
-    let entries = sorted_sstable_files(dir)?;
-
-    // If we've no files, then make our first file.
-    // Otherwise, parse the file_stem into an int (lots of unwrap as we
-    // know the filename has a step and it parses to the uint from the
-    // filters above).
-    // Check it's not max, if so return error.
-    // Add 1 to it.
-    // Make the filename
-    let path = match entries.first() {
-        None => dir.join(format!("{:010}.data", 1)),
-        Some(e) => {
-            let path = e.path();
-            let stem = path.file_stem().unwrap();
-            let n = stem.to_string_lossy().parse::<u32>().unwrap();
-            if n >= u32::MAX - 1 {
-                panic!("Run out of SSTable numbers!");
-            }
-            dir.join(format!("{:010}.data", n + 1))
-        }
-    };
-
-    Ok(path)
-}
-/// Return the SSTables in dir, ordered newest to oldest.
-///
-/// The ordering is such that a get for a key should proceed
-/// scanning files from left to right in the vec.
-fn sorted_sstable_files(dir: &Path) -> Result<Vec<DirEntry>, Error> {
-    // List the files
-    // filter to actual files
-    // filter to data files
-    // filter path file_stem can be parsed to u32.
-    // now we have valid data files.
-    let mut entries: Vec<DirEntry> = fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter(|p| p.path().is_file())
-        .filter(|p| p.path().extension().is_some_and(|e| e == "data"))
-        .filter(|e| {
-            e.path().file_stem().is_some_and(|stem| {
-                stem.len() == 10
-                    && stem.to_string_lossy().parse::<u32>().is_ok()
-            })
-        })
-        .collect();
-
-    // Order the filenames and find the largest (the zero prefix should give
-    // ordering).
-    entries.sort_unstable_by_key(|e| {
-        let path = e.path();
-        let stem = path.file_stem().unwrap();
-        stem.to_os_string()
-    });
-
-    // Reverse, so the newest sstable comes first in the list.
-    entries.reverse();
-
-    Ok(entries)
-}
-
-#[cfg(test)]
-mod tests_sorted_sstable_files {
-    use std::{fs::OpenOptions, io::Error};
-
-    use super::*;
-
-    #[test]
-    fn test_sorted_sstable_files() -> Result<(), Error> {
-        let tmp_dir = tempfile::tempdir().unwrap();
-
-        // Check that we skip invalid file names and that we
-        // order correctly from highest (newest) to lowest (oldest).
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(tmp_dir.path().join("0000000001.data"))?;
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(tmp_dir.path().join("0000000010.data"))?;
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(tmp_dir.path().join("0000060001.data"))?;
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(tmp_dir.path().join("0000000021.data"))?;
-
-        // Bad file stem length
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(tmp_dir.path().join("0060001.data"))?;
-        // Right length, not a number
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(tmp_dir.path().join("barbarbarb.data"))?;
-        // Right length, number, wrong extension
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(tmp_dir.path().join("0000000009.bar"))?;
-
-        let got: Vec<PathBuf> = sorted_sstable_files(tmp_dir.path())?
-            .iter()
-            .map(|d| d.path())
-            .collect();
-
-        assert_eq!(
-            got,
-            vec![
-                tmp_dir.path().join("0000060001.data"),
-                tmp_dir.path().join("0000000021.data"),
-                tmp_dir.path().join("0000000010.data"),
-                tmp_dir.path().join("0000000001.data"),
-            ]
-        );
-        Ok(())
-    }
+fn next_sstable_fname(dir: &Path) -> PathBuf {
+    let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
+    dir.join(format!("{}.sstable", s))
 }
 
 #[derive(Debug)]
