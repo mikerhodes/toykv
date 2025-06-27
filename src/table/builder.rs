@@ -8,6 +8,9 @@
 
 use std::{fs::File, io::Write, mem, path::Path, time::Instant};
 
+use sbbf_rs_safe::Filter;
+use siphasher::sip::SipHasher13;
+
 use crate::{
     block::{BlockBuilder, BlockBuilderError},
     kvrecord::KVWriteValue,
@@ -27,9 +30,21 @@ pub(crate) struct TableBuilder {
     metadata: Vec<u8>,
     /// start time for builder
     start: Instant,
+    /// BloomFilter for table
+    bloom: Filter,
+    hasher: SipHasher13,
 }
 impl TableBuilder {
-    pub(super) fn new() -> TableBuilder {
+    pub(super) fn new(
+        hasher: SipHasher13,
+        expected_writes: usize,
+    ) -> TableBuilder {
+        // Each block = 256 bits of space
+        // For a 1% false positive, 10.5 bits per insert
+        // Blocks => expected * 10.5 / 256
+        // https://github.com/apache/parquet-format/blob/master/BloomFilter.md#sizing-an-sbbf
+        let blocks = (expected_writes as f64 * 10.5 / 256f64) as usize;
+        let bloom = Filter::new(blocks, expected_writes);
         TableBuilder {
             bb: BlockBuilder::new(),
             first_key: None,
@@ -37,6 +52,8 @@ impl TableBuilder {
             data: vec![],
             metadata: vec![],
             start: Instant::now(),
+            bloom,
+            hasher,
         }
     }
     pub(super) fn add(
@@ -56,6 +73,9 @@ impl TableBuilder {
         if let Err(x) = r {
             return Err(x);
         }
+
+        let hash = self.hasher.hash(key);
+        self.bloom.insert_hash(hash);
 
         // Set first key if new block, advance
         // last key to current key.
@@ -85,9 +105,18 @@ impl TableBuilder {
         // );
 
         let mut f = File::create(p)?;
+
+        // Write raw data
         f.write(&self.data)?;
         f.write(&self.metadata)?;
-        f.write(&(self.data.len() as u32).to_be_bytes())?; // metadata offset
+        f.write(&self.bloom.as_bytes())?;
+
+        // Write offsets
+        let metadata_offset = self.data.len() as u32;
+        f.write(&metadata_offset.to_be_bytes())?;
+        let bloom_offset = (self.data.len() + self.metadata.len()) as u32;
+        f.write(&bloom_offset.to_be_bytes())?;
+
         f.flush()?;
         f.sync_all()?;
 
