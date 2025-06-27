@@ -101,7 +101,7 @@ impl WAL {
         let mut cnt = 0;
         let mut last_read_seq = 0;
         while bytes.stream_position()? < size {
-            dbg!(bytes.stream_position()?);
+            // dbg!(bytes.stream_position()?);
             let rec = WALRecord::read_one(&mut bytes)?;
             // dbg!(&rec);
             match rec {

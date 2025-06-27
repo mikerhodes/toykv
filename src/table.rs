@@ -13,8 +13,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const BLOOM_HASH_KEY: &[u8; 16] =
+    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
 use builder::TableBuilder;
 use iterator::TableIterator;
+use siphasher::sip::SipHasher13;
 use tableindex::SSTableIndex;
 
 use crate::kvrecord::KVValue;
@@ -28,6 +32,10 @@ pub(crate) struct SSTables {
     d: PathBuf,
     sstables_index: SSTableIndex,
     sstables: SSTablesReader,
+
+    // Ensure we share the same hashing between
+    // builder and iterator for bloom filter.
+    bloom_hasher: SipHasher13,
 }
 
 impl SSTables {
@@ -36,11 +44,13 @@ impl SSTables {
         let index_path = d.join("sstable_index.json");
         let sstables_index = SSTableIndex::open(index_path)?;
         let files = sstables_index.levels.l0.clone();
-        let sstables = SSTablesReader::new(files)?;
+        let hasher = SipHasher13::new_with_key(BLOOM_HASH_KEY);
+        let sstables = SSTablesReader::new(files, hasher)?;
         Ok(SSTables {
             d: d.to_path_buf(),
             sstables_index,
             sstables,
+            bloom_hasher: hasher,
         })
     }
 
@@ -54,7 +64,7 @@ impl SSTables {
     ) -> Result<(), Error> {
         let fname = next_sstable_fname(self.d.as_path());
 
-        let mut sst = TableBuilder::new();
+        let mut sst = TableBuilder::new(self.bloom_hasher, memtable.len());
         for entry in memtable {
             assert!(sst.add(entry.0, &entry.1.into()).is_ok());
         }
@@ -65,8 +75,10 @@ impl SSTables {
         self.sstables_index.write()?;
 
         // Load new SSTablesReader for the new state.
-        self.sstables =
-            SSTablesReader::new(self.sstables_index.levels.l0.clone())?;
+        self.sstables = SSTablesReader::new(
+            self.sstables_index.levels.l0.clone(),
+            self.bloom_hasher,
+        )?;
 
         Ok(())
     }
@@ -80,7 +92,7 @@ impl SSTables {
     pub(crate) fn iters(&self) -> Result<Vec<TableIterator>, Error> {
         let mut vec = vec![];
         for table_path in &self.sstables_index.levels.l0 {
-            let it = TableIterator::new(table_path.clone())?;
+            let it = TableIterator::new(table_path.clone(), self.bloom_hasher)?;
             vec.push(it);
         }
         Ok(vec)
@@ -91,6 +103,7 @@ struct SSTablesReader {
     /// tables maintains a set of BufReaders on every sstable
     /// file in the set. This isn't that scalable.
     tables: Vec<TableIterator>,
+    bloom_hasher: SipHasher13,
 }
 
 /// SSTablesReader provides operations over a set of sstable files
@@ -101,12 +114,18 @@ impl SSTablesReader {
     /// Create a new SSTableFileReader that is able to search
     /// for keys in the Vec of sstable files, organised newest
     /// to oldest.
-    fn new(sstable_files: Vec<PathBuf>) -> Result<SSTablesReader, Error> {
+    fn new(
+        sstable_files: Vec<PathBuf>,
+        bloom_hasher: SipHasher13,
+    ) -> Result<SSTablesReader, Error> {
         let mut tables: Vec<TableIterator> = vec![];
         for p in sstable_files {
-            tables.push(TableIterator::new(p)?);
+            tables.push(TableIterator::new(p, bloom_hasher)?);
         }
-        Ok(SSTablesReader { tables })
+        Ok(SSTablesReader {
+            tables,
+            bloom_hasher,
+        })
     }
 
     /// Search through the SSTables available to this reader for
@@ -115,11 +134,21 @@ impl SSTablesReader {
         // self.tables is in the right order for scanning the sstables
         // on disk. Read each to find k. If no SSTable file contains
         // k, return None.
-        for t in self.tables.as_mut_slice() {
+        // let mut tables_searched = 0;
+        let hash = self.bloom_hasher.hash(k);
+        for t in self
+            .tables
+            .iter_mut()
+            .filter(|t| t.might_contain_hashed_key(hash))
+        {
             // dbg!("t in tables");
+            // tables_searched += 1;
             t.seek_to_key(k)?;
             match t.next() {
-                Some(Ok(v)) if v.key == k => return Ok(Some(v.value)),
+                Some(Ok(v)) if v.key == k => {
+                    // dbg!(tables_searched);
+                    return Ok(Some(v.value));
+                }
                 Some(Ok(_)) | None => continue, // not in this sstable
                 Some(Err(x)) => return Err(x),
             }
@@ -203,13 +232,13 @@ mod tests {
     #[test]
     fn test_table_builder_new() {
         // Test that creating a new TableBuilder doesn't crash
-        let _table_builder = TableBuilder::new();
+        let _table_builder = TableBuilder::new(SipHasher13::new(), 0);
     }
 
     #[test]
     fn test_table_builder_add_single_entry() {
         // Test that adding a single entry doesn't crash
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1);
         let result =
             table_builder.add(b"test_key", &KVWriteValue::Some(b"test_value"));
         assert!(result.is_ok());
@@ -218,7 +247,7 @@ mod tests {
     #[test]
     fn test_table_builder_add_multiple_entries() {
         // Test that adding multiple entries doesn't crash
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 3);
 
         let result1 =
             table_builder.add(b"key1", &KVWriteValue::Some(b"value1"));
@@ -235,7 +264,7 @@ mod tests {
     #[test]
     fn test_table_builder_many_entries() {
         // Test that adding many entries doesn't crash
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         for i in 0..1000 {
             let key = format!("key{:04}", i);
@@ -255,7 +284,7 @@ mod tests {
     #[test]
     fn test_table_builder_estimate_size() {
         // Test that estimate_size doesn't crash
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Should work on empty table
         let _size = table_builder.estimate_size();
@@ -269,7 +298,7 @@ mod tests {
     #[test]
     fn test_table_builder_write() {
         // Test that writing to a file doesn't crash
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Add some test data
         let _ = table_builder.add(b"key1", &KVWriteValue::Some(b"value1"));
@@ -289,7 +318,7 @@ mod tests {
     #[test]
     fn test_round_trip_single_entry() {
         // Test round-trip with a single entry
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
         table_builder
             .add(b"hello", &KVWriteValue::Some(b"world"))
             .unwrap();
@@ -299,8 +328,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
         assert_eq!(first_record.key, b"hello");
@@ -313,7 +345,7 @@ mod tests {
     #[test]
     fn test_round_trip_multiple_entries() {
         // Test round-trip with multiple entries
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         let test_data = vec![
             (b"apple".as_slice(), KVWriteValue::Some(b"red fruit")),
@@ -331,8 +363,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -357,7 +392,7 @@ mod tests {
     #[test]
     fn test_round_trip_with_deleted_entries() {
         // Test round-trip with both live and deleted entries
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"a_alive1", &KVWriteValue::Some(b"data1"))
@@ -380,8 +415,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -406,7 +444,7 @@ mod tests {
     #[test]
     fn test_round_trip_large_entries() {
         // Test round-trip with large entries that should span multiple blocks
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         let entries = 10123;
 
@@ -429,8 +467,11 @@ mod tests {
         );
 
         // Read back with TableIterator
-        let table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -453,7 +494,7 @@ mod tests {
     #[test]
     fn test_round_trip_many_small_entries() {
         // Test round-trip with many small entries that span multiple blocks
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         let num_entries = 1000;
         for i in 0..num_entries {
@@ -469,8 +510,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -491,7 +535,7 @@ mod tests {
     #[test]
     fn test_round_trip_mixed_entry_sizes() {
         // Test round-trip with entries of varying sizes
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Small entry
         table_builder.add(b"a", &KVWriteValue::Some(b"1")).unwrap();
@@ -523,8 +567,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -552,7 +599,7 @@ mod tests {
     #[test]
     fn test_round_trip_empty_table() {
         // Test round-trip with empty table
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         let temp_file =
             tempfile::NamedTempFile::new().expect("Failed to create temp file");
@@ -566,7 +613,7 @@ mod tests {
     #[test]
     fn test_round_trip_keys_with_special_bytes() {
         // Test round-trip with keys/values containing special byte values
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Keys and values with null bytes
         table_builder
@@ -591,8 +638,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -617,7 +667,7 @@ mod tests {
     #[test]
     fn test_round_trip_partial_iteration() {
         // Test that TableIterator can be partially consumed
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         for i in 0..10 {
             let key = format!("item{:02}", i);
@@ -632,8 +682,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator but only consume first few entries
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
 
         // Consume first 3 entries
         let first = table_iterator.next().unwrap().unwrap();
@@ -657,7 +710,7 @@ mod tests {
     #[test]
     fn test_round_trip_max_size_entries() {
         // Test round-trip with maximum size entries
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Create maximum size key and value (within u16 limits)
         let max_key = vec![b'K'; 1000]; // Large but not maximum to avoid memory issues
@@ -677,8 +730,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -695,7 +751,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_exact_match() {
         // Test seeking to a key that exists exactly in the table
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Using alphabetical prefixes to ensure proper ordering
         table_builder
@@ -719,8 +775,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Test seeking to "c_cherry" which exists in the table
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         table_iterator.seek_to_key(b"c_cherry").unwrap();
 
         // After seeking, next() should return "c_cherry" first
@@ -748,7 +807,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_non_existent_key() {
         // Test seeking to a key that doesn't exist - should start from next key
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
@@ -768,8 +827,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Test seeking to "b_banana" which doesn't exist - should start from "c_cherry"
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         table_iterator.seek_to_key(b"b_banana").unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
@@ -789,7 +851,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_before_first_key() {
         // Test seeking to a key that comes before all keys in the table
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"b_banana", &KVWriteValue::Some(b"yellow fruit"))
@@ -806,8 +868,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to a key before all entries
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         table_iterator.seek_to_key(b"a_apple").unwrap();
 
         // Should start from the first key
@@ -819,7 +884,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_after_last_key() {
         // Test seeking to a key that comes after all keys in the table
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
@@ -836,8 +901,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to a key after all entries
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         table_iterator.seek_to_key(b"z_zucchini").unwrap();
 
         // Should have no more records
@@ -847,7 +915,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_first_key() {
         // Test seeking to the first key in the table
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
@@ -864,8 +932,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to the first key
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         table_iterator.seek_to_key(b"a_apple").unwrap();
 
         // Should return all records starting from the first
@@ -880,7 +951,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_last_key() {
         // Test seeking to the last key in the table
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
@@ -897,8 +968,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to the last key
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         table_iterator.seek_to_key(b"c_cherry").unwrap();
 
         // Should return only the last record
@@ -915,7 +989,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_with_deleted_entries() {
         // Test seeking when the table contains deleted entries
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
@@ -938,8 +1012,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to deleted entry "b_banana"
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         table_iterator.seek_to_key(b"b_banana").unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
@@ -958,7 +1035,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_multiple_seeks() {
         // Test multiple seeks on the same iterator
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
@@ -980,8 +1057,11 @@ mod tests {
             tempfile::NamedTempFile::new().expect("Failed to create temp file");
         table_builder.write(temp_file.path()).unwrap();
 
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
 
         // First seek to "c_cherry"
         table_iterator.seek_to_key(b"c_cherry").unwrap();
@@ -1006,7 +1086,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_large_table() {
         // Test seeking in a table with many entries (spanning multiple blocks)
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Create many entries to force multiple blocks
         for i in 0..1000 {
@@ -1021,8 +1101,11 @@ mod tests {
             tempfile::NamedTempFile::new().expect("Failed to create temp file");
         table_builder.write(temp_file.path()).unwrap();
 
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
 
         // Seek to a key in the middle
         table_iterator.seek_to_key(b"key000500").unwrap();
@@ -1042,7 +1125,7 @@ mod tests {
     #[test]
     fn test_seek_to_key_empty_key() {
         // Test seeking with an empty key
-        let mut table_builder = TableBuilder::new();
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
             .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
@@ -1056,8 +1139,11 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to empty key (should start from first key)
-        let mut table_iterator =
-            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
+        let mut table_iterator = TableIterator::new(
+            temp_file.path().to_path_buf(),
+            SipHasher13::new(),
+        )
+        .unwrap();
         table_iterator.seek_to_key(b"").unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();

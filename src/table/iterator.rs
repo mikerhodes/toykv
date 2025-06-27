@@ -14,6 +14,9 @@ use std::{
     sync::Arc,
 };
 
+use sbbf_rs_safe::Filter;
+use siphasher::sip::SipHasher13;
+
 use crate::{
     block::Block, blockiterator::BlockIterator, kvrecord::KVRecord,
     table::BlockMeta,
@@ -26,15 +29,23 @@ pub(crate) struct TableIterator {
     // current block
     bi: BlockIterator,
     b_idx: usize,
+    // bloom filter
+    bloom: Filter,
+    hasher: SipHasher13,
 }
 
 impl TableIterator {
     /// Return a new TableIterator postioned at the
     /// start of the table.
-    pub(crate) fn new(path: PathBuf) -> Result<TableIterator, Error> {
+    pub(crate) fn new(
+        path: PathBuf,
+        hasher: SipHasher13,
+    ) -> Result<TableIterator, Error> {
         let f = OpenOptions::new().read(true).open(&path)?;
         let mut br = BufReader::with_capacity(8 * 1024, f);
         let bm = TableIterator::load_block_meta(&mut br)?;
+        let bloom = TableIterator::load_bloom_filter(&mut br)?;
+        assert!(bloom.is_some(), "could not load bloom filter from table");
         let first_block = TableIterator::load_block(&mut br, &bm[0])?;
         br.rewind()?;
         Ok(TableIterator {
@@ -43,7 +54,45 @@ impl TableIterator {
             bm,
             bi: BlockIterator::create(first_block),
             b_idx: 0,
+            bloom: bloom.unwrap(),
+            hasher,
         })
+    }
+
+    // Use bloom filter to check whether key is in table (can false positive).
+    pub(crate) fn might_contain_key(&self, key: &[u8]) -> bool {
+        let hash = self.hasher.hash(key);
+        self.bloom.contains_hash(hash)
+    }
+    pub(crate) fn might_contain_hashed_key(&self, hash: u64) -> bool {
+        self.bloom.contains_hash(hash)
+    }
+
+    fn load_bloom_filter(
+        f: &mut BufReader<File>,
+    ) -> Result<Option<Filter>, Error> {
+        // File tail structure:
+        //
+        // block_metadata | bloom | block_metadata offset: u32 | bloom offset: u32
+        //
+        // So to read the metadata we need to read:
+        // file[metadata offset..bloom offset];
+
+        // First, get the end of the bloom filter by seeking
+        let bloom_end_offset = f.seek(SeekFrom::End(-8))?;
+
+        // Next, read the bloom start offset from the end of the file
+        f.seek(SeekFrom::End(-4))?;
+        let mut u32bytebuf = [0u8; 4];
+        f.read_exact(&mut u32bytebuf)?;
+        let bloom_start_offset = u32::from_be_bytes(u32bytebuf);
+
+        let bloom_len = bloom_end_offset as usize - bloom_start_offset as usize;
+        f.seek(SeekFrom::Start(bloom_start_offset as u64))?;
+        let mut bloombuf = vec![0u8; bloom_len];
+        f.read_exact(&mut bloombuf[..])?;
+
+        Ok(Filter::from_bytes(&bloombuf[..]))
     }
 
     /// load block metadata from a reader
@@ -51,14 +100,21 @@ impl TableIterator {
     fn load_block_meta(
         f: &mut BufReader<File>,
     ) -> Result<Vec<BlockMeta>, Error> {
-        let mut u32bytebuf = [0u8; 4];
+        // File tail structure:
+        //
+        // block_metadata | bloom | block_metadata offset | bloom offset
+        //
+        // So to read the metadata we need to read:
+        // file[metadata offset..bloom offset];
 
-        // File ends with a u32 that tells us where the
-        // metadata block starts.
-        let bm_end_offset = f.seek(SeekFrom::End(-4))?;
+        // Read the two u32 offsets
+        let mut u32bytebuf = [0u8; 4];
+        f.seek(SeekFrom::End(-8))?;
         f.read_exact(&mut u32bytebuf)?;
         let bm_start_offset = u32::from_be_bytes(u32bytebuf);
-        // dbg!(bm_start_offset);
+        f.read_exact(&mut u32bytebuf)?;
+        let bloom_start_offset = u32::from_be_bytes(u32bytebuf);
+        let bm_end_offset = bloom_start_offset as u64;
 
         f.seek(SeekFrom::Start(bm_start_offset as u64))?;
 
