@@ -15,7 +15,6 @@ use std::{
 };
 
 use sbbf_rs_safe::Filter;
-use siphasher::sip::SipHasher13;
 
 use crate::{
     block::Block, blockiterator::BlockIterator, kvrecord::KVRecord,
@@ -31,16 +30,12 @@ pub(crate) struct TableIterator {
     b_idx: usize,
     // bloom filter
     bloom: Filter,
-    hasher: SipHasher13,
 }
 
 impl TableIterator {
     /// Return a new TableIterator postioned at the
     /// start of the table.
-    pub(crate) fn new(
-        path: PathBuf,
-        hasher: SipHasher13,
-    ) -> Result<TableIterator, Error> {
+    pub(crate) fn new(path: PathBuf) -> Result<TableIterator, Error> {
         let f = OpenOptions::new().read(true).open(&path)?;
         let mut br = BufReader::with_capacity(8 * 1024, f);
         let bm = TableIterator::load_block_meta(&mut br)?;
@@ -55,15 +50,9 @@ impl TableIterator {
             bi: BlockIterator::create(first_block),
             b_idx: 0,
             bloom: bloom.unwrap(),
-            hasher,
         })
     }
 
-    // Use bloom filter to check whether key is in table (can false positive).
-    pub(crate) fn might_contain_key(&self, key: &[u8]) -> bool {
-        let hash = self.hasher.hash(key);
-        self.bloom.contains_hash(hash)
-    }
     pub(crate) fn might_contain_hashed_key(&self, hash: u64) -> bool {
         self.bloom.contains_hash(hash)
     }

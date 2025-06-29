@@ -108,7 +108,7 @@ impl SSTables {
     pub(crate) fn iters(&self) -> Result<Vec<TableIterator>, Error> {
         let mut vec = vec![];
         for table_path in &self.sstables_index.levels.l0 {
-            let it = TableIterator::new(table_path.clone(), self.bloom_hasher)?;
+            let it = TableIterator::new(table_path.clone())?;
             vec.push(it);
         }
         Ok(vec)
@@ -285,11 +285,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
         assert_eq!(first_record.key, b"hello");
@@ -320,11 +317,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -372,11 +366,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -424,11 +415,8 @@ mod tests {
         );
 
         // Read back with TableIterator
-        let table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -467,11 +455,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -524,11 +509,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -595,11 +577,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -639,11 +618,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator but only consume first few entries
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
 
         // Consume first 3 entries
         let first = table_iterator.next().unwrap().unwrap();
@@ -687,11 +663,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Read back with TableIterator
-        let table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
         let records = records.unwrap();
 
@@ -732,11 +705,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Test seeking to "c_cherry" which exists in the table
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         table_iterator.seek_to_key(b"c_cherry").unwrap();
 
         // After seeking, next() should return "c_cherry" first
@@ -784,11 +754,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Test seeking to "b_banana" which doesn't exist - should start from "c_cherry"
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         table_iterator.seek_to_key(b"b_banana").unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
@@ -825,11 +792,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to a key before all entries
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         table_iterator.seek_to_key(b"a_apple").unwrap();
 
         // Should start from the first key
@@ -858,11 +822,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to a key after all entries
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         table_iterator.seek_to_key(b"z_zucchini").unwrap();
 
         // Should have no more records
@@ -889,11 +850,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to the first key
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         table_iterator.seek_to_key(b"a_apple").unwrap();
 
         // Should return all records starting from the first
@@ -925,11 +883,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to the last key
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         table_iterator.seek_to_key(b"c_cherry").unwrap();
 
         // Should return only the last record
@@ -969,11 +924,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to deleted entry "b_banana"
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         table_iterator.seek_to_key(b"b_banana").unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
@@ -1014,11 +966,8 @@ mod tests {
             tempfile::NamedTempFile::new().expect("Failed to create temp file");
         table_builder.write(temp_file.path()).unwrap();
 
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
 
         // First seek to "c_cherry"
         table_iterator.seek_to_key(b"c_cherry").unwrap();
@@ -1058,11 +1007,8 @@ mod tests {
             tempfile::NamedTempFile::new().expect("Failed to create temp file");
         table_builder.write(temp_file.path()).unwrap();
 
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
 
         // Seek to a key in the middle
         table_iterator.seek_to_key(b"key000500").unwrap();
@@ -1096,11 +1042,8 @@ mod tests {
         table_builder.write(temp_file.path()).unwrap();
 
         // Seek to empty key (should start from first key)
-        let mut table_iterator = TableIterator::new(
-            temp_file.path().to_path_buf(),
-            SipHasher13::new(),
-        )
-        .unwrap();
+        let mut table_iterator =
+            TableIterator::new(temp_file.path().to_path_buf()).unwrap();
         table_iterator.seek_to_key(b"").unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
