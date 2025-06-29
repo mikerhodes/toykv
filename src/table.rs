@@ -13,9 +13,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const BLOOM_HASH_KEY: &[u8; 16] =
-    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-
 use builder::TableBuilder;
 use iterator::TableIterator;
 use siphasher::sip::SipHasher13;
@@ -25,99 +22,86 @@ use crate::kvrecord::KVValue;
 
 mod builder;
 mod iterator;
-mod tableindex;
+pub mod tableindex;
 
-/// Manage and search a set of SSTable files on disk.
-pub(crate) struct SSTables {
-    d: PathBuf,
-    sstables_index: SSTableIndex,
+/// Create the TableIterators for L0 in the passed index.
+pub(crate) fn sstables_table_iters(
+    idx: &SSTableIndex,
+) -> Result<Vec<TableIterator>, Error> {
+    let mut vec = vec![];
+    for table_path in &idx.levels.l0 {
+        let it = TableIterator::new(table_path.clone())?;
+        vec.push(it);
+    }
+    Ok(vec)
+}
 
-    // Ensure we share the same hashing between
-    // builder and iterator for bloom filter.
+/// Get the value for key in the passed tables.
+/// tables are assumed to be L0, in the order newest to oldest.
+/// bloom_hasher must be the hasher used for writing the
+/// sstables.
+pub(crate) fn sstables_get(
+    mut tables: Vec<TableIterator>,
     bloom_hasher: SipHasher13,
-}
-
-impl SSTables {
-    /// Create a new SSTables whose files live in the directory d.
-    pub(crate) fn new(d: &Path) -> Result<SSTables, Error> {
-        let index_path = d.join("sstable_index.json");
-        let sstables_index = SSTableIndex::open(index_path)?;
-        let hasher = SipHasher13::new_with_key(BLOOM_HASH_KEY);
-        Ok(SSTables {
-            d: d.to_path_buf(),
-            sstables_index,
-            bloom_hasher: hasher,
-        })
-    }
-
-    /// Write a new SSTable to the set managed by this
-    /// SSTables. After this method returns, the contents
-    /// of the memtable are durable on disk and are used
-    /// by future calls to `get`.
-    pub(crate) fn write_new_sstable(
-        &mut self,
-        memtable: &BTreeMap<Vec<u8>, KVValue>,
-    ) -> Result<(), Error> {
-        let fname = next_sstable_fname(self.d.as_path());
-
-        let mut sst = TableBuilder::new(self.bloom_hasher, memtable.len());
-        for entry in memtable {
-            assert!(sst.add(entry.0, &entry.1.into()).is_ok());
-        }
-        sst.write(fname.as_path())?;
-
-        // Commit the new sstable to the index.
-        self.sstables_index.levels.l0.insert(0, fname);
-        self.sstables_index.write()?;
-
-        Ok(())
-    }
-
-    /// Retrieve the latest value for `k` in the on disk
-    /// set of sstables.
-    pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
-        let mut tables = self.iters()?;
-
-        // tables is in the right order for scanning the l0 sstables
-        // on disk. Read each to find k. If no SSTable file contains
-        // k, return None.
-        // let mut tables_searched = 0;
-        let hash = self.bloom_hasher.hash(k);
-        for t in tables
-            .iter_mut()
-            .filter(|t| t.might_contain_hashed_key(hash))
-        {
-            // dbg!("t in tables");
-            // tables_searched += 1;
-            t.seek_to_key(k)?;
-            match t.next() {
-                Some(Ok(v)) if v.key == k => {
-                    // dbg!(tables_searched);
-                    return Ok(Some(v.value));
-                }
-                Some(Ok(_)) | None => continue, // not in this sstable
-                Some(Err(x)) => return Err(x),
+    key: &[u8],
+) -> Result<Option<KVValue>, Error> {
+    // tables is in the right order for scanning the l0 sstables
+    // on disk. Read each to find k. If no SSTable file contains
+    // k, return None.
+    let mut tables_searched = 0;
+    let hash = bloom_hasher.hash(key);
+    for t in tables
+        .iter_mut()
+        .filter(|t| t.might_contain_hashed_key(hash))
+    {
+        // dbg!("t in tables");
+        tables_searched += 1;
+        t.seek_to_key(key)?;
+        match t.next() {
+            Some(Ok(v)) if v.key == key => {
+                dbg!(tables_searched);
+                return Ok(Some(v.value));
             }
+            Some(Ok(_)) | None => continue, // not in this sstable
+            Some(Err(x)) => return Err(x),
         }
-        // Otherwise, we didn't find it.
-        Ok(None)
     }
-
-    /// iters returns a set of TableIterators in the right order to
-    /// search for items at l0, with the newest sstable at index 0.
-    pub(crate) fn iters(&self) -> Result<Vec<TableIterator>, Error> {
-        let mut vec = vec![];
-        for table_path in &self.sstables_index.levels.l0 {
-            let it = TableIterator::new(table_path.clone())?;
-            vec.push(it);
-        }
-        Ok(vec)
-    }
+    // Otherwise, we didn't find it.
+    Ok(None)
 }
 
+/// Write a new sstable for memtable to d, returning the new sstable path.
+/// bloom_hasher must be the same used for reading from sstables.
+pub(crate) fn sstables_write_new(
+    d: &Path,
+    bloom_hasher: SipHasher13,
+    memtable: &BTreeMap<Vec<u8>, KVValue>,
+) -> Result<PathBuf, Error> {
+    let fname = next_sstable_fname(d);
+
+    let mut sst = TableBuilder::new(bloom_hasher, memtable.len());
+    for entry in memtable {
+        assert!(sst.add(entry.0, &entry.1.into()).is_ok());
+    }
+    sst.write(fname.as_path())?;
+
+    Ok(fname)
+}
+
+/// Returns a new sstable name for dir.
+/// In practice, just a unique name within dir.
 fn next_sstable_fname(dir: &Path) -> PathBuf {
-    let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
-    dir.join(format!("{}.sstable", s))
+    let mut tries = 0;
+    loop {
+        let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
+        let p = dir.join(format!("{}.sstable", s));
+        if !p.exists() {
+            return p;
+        }
+
+        tries += 1;
+        assert!(tries < 100, "Could not generate new file name for sstable!");
+    }
 }
 
 #[derive(Debug)]

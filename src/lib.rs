@@ -1,9 +1,18 @@
-use std::{collections::BTreeMap, io::Error, ops::Bound, path::Path};
+use std::{
+    collections::BTreeMap,
+    io::Error,
+    ops::Bound,
+    path::{Path, PathBuf},
+};
 
 use error::ToyKVError;
 use kvrecord::{KVRecord, KVValue};
 use merge_iterator::MergeIterator;
-use table::SSTables;
+use siphasher::sip::SipHasher13;
+use table::{
+    sstables_get, sstables_table_iters, sstables_write_new,
+    tableindex::SSTableIndex,
+};
 use wal::WAL;
 
 mod block;
@@ -13,6 +22,9 @@ mod kvrecord;
 mod merge_iterator;
 mod table;
 mod wal;
+
+const BLOOM_HASH_KEY: &[u8; 16] =
+    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum WALSync {
@@ -32,9 +44,15 @@ pub struct ToyKV {
     /// d is the folder that the KV store owns.
     memtable: BTreeMap<Vec<u8>, KVValue>,
     wal: WAL,
-    sstables: SSTables,
     pub metrics: ToyKVMetrics,
     wal_write_threshold: u64,
+
+    d: PathBuf,
+    sstables_index: SSTableIndex,
+
+    // Ensure we share the same hashing between
+    // builder and iterator for bloom filter.
+    bloom_hasher: SipHasher13,
 }
 
 struct ToyKVOptions {
@@ -87,13 +105,17 @@ impl ToyKVBuilder {
 
         let mut wal = wal::new(d, self.options.wal_sync);
         let memtable = wal.replay()?;
-        let sstables = table::SSTables::new(d)?;
+        let index_path = d.join("sstable_index.json");
+        let sstables_index = SSTableIndex::open(index_path)?;
+        let bloom_hasher = SipHasher13::new_with_key(BLOOM_HASH_KEY);
         Ok(ToyKV {
             memtable,
             wal,
-            sstables,
             metrics: Default::default(),
             wal_write_threshold: self.options.wal_write_threshold,
+            d: d.to_path_buf(),
+            sstables_index,
+            bloom_hasher,
         })
     }
 }
@@ -149,12 +171,20 @@ impl ToyKV {
 
     /// Internal method to write a KVValue to WAL and memtable
     fn write(&mut self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
+        // Change database state.
         self.wal.write(&k, (&v).into())?;
         self.memtable.insert(k, v);
+
         if self.wal.wal_writes >= self.wal_write_threshold {
-            self.sstables.write_new_sstable(&self.memtable)?;
+            let new_sstable_path =
+                sstables_write_new(&self.d, self.bloom_hasher, &self.memtable)?;
+
+            // These operations advance the state of the database
+            self.sstables_index.levels.l0.insert(0, new_sstable_path);
+            self.sstables_index.write()?;
             self.wal.reset()?;
             self.memtable.clear();
+
             self.metrics.sst_flushes += 1;
         }
         Ok(())
@@ -172,10 +202,17 @@ impl ToyKV {
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
+
+        // Need to take place over a single database "state"
         let r = self.memtable.get(&k);
         let r = match r {
             Some(r) => Some(r.to_owned()),
-            None => self.sstables.get(&k)?,
+            None => {
+                let tables = sstables_table_iters(&self.sstables_index)?;
+                // This should be moved out of the critical section,
+                // the tables hold open the right files for the state.
+                sstables_get(tables, self.bloom_hasher, &k)?
+            }
         };
 
         // This is the moment where we consume the KVValue::Deleted
@@ -221,7 +258,7 @@ impl ToyKV {
         }
 
         // Add sstables to the merge iterator
-        let mut iters = self.sstables.iters()?;
+        let mut iters = sstables_table_iters(&self.sstables_index)?;
         if let Some(k) = start_key {
             for t in &mut iters {
                 t.seek_to_key(k)?;
