@@ -76,62 +76,14 @@ impl SSTables {
     /// Retrieve the latest value for `k` in the on disk
     /// set of sstables.
     pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
-        SSTablesReader::new(
-            self.sstables_index.levels.l0.clone(),
-            self.bloom_hasher,
-        )?
-        .get(k)
-    }
+        let mut tables = self.iters()?;
 
-    pub(crate) fn iters(&self) -> Result<Vec<TableIterator>, Error> {
-        let mut vec = vec![];
-        for table_path in &self.sstables_index.levels.l0 {
-            let it = TableIterator::new(table_path.clone(), self.bloom_hasher)?;
-            vec.push(it);
-        }
-        Ok(vec)
-    }
-}
-/// Iterate entries in an on-disk SSTable.
-struct SSTablesReader {
-    /// tables maintains a set of BufReaders on every sstable
-    /// file in the set. This isn't that scalable.
-    tables: Vec<TableIterator>,
-    bloom_hasher: SipHasher13,
-}
-
-/// SSTablesReader provides operations over a set of sstable files
-/// on disk. As sstable files are immutable, this can be considered
-/// a reader over a given snapshot of the database (at least, the
-/// sstables portion of it).
-impl SSTablesReader {
-    /// Create a new SSTableFileReader that is able to search
-    /// for keys in the Vec of sstable files, organised newest
-    /// to oldest.
-    fn new(
-        sstable_files: Vec<PathBuf>,
-        bloom_hasher: SipHasher13,
-    ) -> Result<SSTablesReader, Error> {
-        let mut tables: Vec<TableIterator> = vec![];
-        for p in sstable_files {
-            tables.push(TableIterator::new(p, bloom_hasher)?);
-        }
-        Ok(SSTablesReader {
-            tables,
-            bloom_hasher,
-        })
-    }
-
-    /// Search through the SSTables available to this reader for
-    /// a key. Return an Option with its value.
-    fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
-        // self.tables is in the right order for scanning the sstables
+        // tables is in the right order for scanning the l0 sstables
         // on disk. Read each to find k. If no SSTable file contains
         // k, return None.
         // let mut tables_searched = 0;
         let hash = self.bloom_hasher.hash(k);
-        for t in self
-            .tables
+        for t in tables
             .iter_mut()
             .filter(|t| t.might_contain_hashed_key(hash))
         {
@@ -149,6 +101,17 @@ impl SSTablesReader {
         }
         // Otherwise, we didn't find it.
         Ok(None)
+    }
+
+    /// iters returns a set of TableIterators in the right order to
+    /// search for items at l0, with the newest sstable at index 0.
+    pub(crate) fn iters(&self) -> Result<Vec<TableIterator>, Error> {
+        let mut vec = vec![];
+        for table_path in &self.sstables_index.levels.l0 {
+            let it = TableIterator::new(table_path.clone(), self.bloom_hasher)?;
+            vec.push(it);
+        }
+        Ok(vec)
     }
 }
 
