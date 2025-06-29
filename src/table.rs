@@ -31,7 +31,6 @@ mod tableindex;
 pub(crate) struct SSTables {
     d: PathBuf,
     sstables_index: SSTableIndex,
-    sstables: SSTablesReader,
 
     // Ensure we share the same hashing between
     // builder and iterator for bloom filter.
@@ -43,13 +42,10 @@ impl SSTables {
     pub(crate) fn new(d: &Path) -> Result<SSTables, Error> {
         let index_path = d.join("sstable_index.json");
         let sstables_index = SSTableIndex::open(index_path)?;
-        let files = sstables_index.levels.l0.clone();
         let hasher = SipHasher13::new_with_key(BLOOM_HASH_KEY);
-        let sstables = SSTablesReader::new(files, hasher)?;
         Ok(SSTables {
             d: d.to_path_buf(),
             sstables_index,
-            sstables,
             bloom_hasher: hasher,
         })
     }
@@ -74,19 +70,17 @@ impl SSTables {
         self.sstables_index.levels.l0.insert(0, fname);
         self.sstables_index.write()?;
 
-        // Load new SSTablesReader for the new state.
-        self.sstables = SSTablesReader::new(
-            self.sstables_index.levels.l0.clone(),
-            self.bloom_hasher,
-        )?;
-
         Ok(())
     }
 
     /// Retrieve the latest value for `k` in the on disk
     /// set of sstables.
     pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
-        self.sstables.get(k)
+        SSTablesReader::new(
+            self.sstables_index.levels.l0.clone(),
+            self.bloom_hasher,
+        )?
+        .get(k)
     }
 
     pub(crate) fn iters(&self) -> Result<Vec<TableIterator>, Error> {
