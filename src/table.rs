@@ -48,18 +48,18 @@ pub(crate) fn sstables_get(
     // tables is in the right order for scanning the l0 sstables
     // on disk. Read each to find k. If no SSTable file contains
     // k, return None.
-    let mut tables_searched = 0;
+    // let mut tables_searched = 0;
     let hash = bloom_hasher.hash(key);
     for t in tables
         .iter_mut()
         .filter(|t| t.might_contain_hashed_key(hash))
     {
         // dbg!("t in tables");
-        tables_searched += 1;
+        // tables_searched += 1;
         t.seek_to_key(key)?;
         match t.next() {
             Some(Ok(v)) if v.key == key => {
-                dbg!(tables_searched);
+                // dbg!(tables_searched);
                 return Ok(Some(v.value));
             }
             Some(Ok(_)) | None => continue, // not in this sstable

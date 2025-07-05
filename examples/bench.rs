@@ -33,7 +33,7 @@ fn main() -> Result<(), ToyKVError> {
 
     let now = Instant::now();
     for n in 1..(writes + 1) {
-        dbg!(n);
+        // dbg!(n);
         let got = db.get(n.to_be_bytes().as_slice())?;
         assert_eq!(
             got.unwrap(),
