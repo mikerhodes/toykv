@@ -38,10 +38,18 @@ struct TableReader {
     b_idx: usize,
     // bloom filter
     bloom: Filter,
+
+    // block_cache is keyed on the block's start_offset
+    block_cache: Cache<BlockHashKey, Arc<Block>>,
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, PartialOrd, Ord)]
+struct BlockHashKey {
+    path: PathBuf,
+    start_offset: u32,
 }
 impl TableReader {
-    /// Return a new TableIterator postioned at the
-    /// start of the table.
+    /// Return a new TableReader.
     fn new(path: PathBuf) -> Result<TableReader, Error> {
         let f = OpenOptions::new().read(true).open(&path)?;
         let br = Mutex::new(BufReader::with_capacity(8 * 1024, f));
@@ -52,17 +60,44 @@ impl TableReader {
             let mut br = br.lock().unwrap();
             br.rewind()?;
         }
+        print!("Build table reader {}\n", path.display());
         Ok(TableReader {
             f: br,
             p: path,
             bm,
             b_idx: 0,
             bloom: bloom.unwrap(),
+            block_cache: Cache::builder().max_capacity(1000).build(),
         })
     }
 
     fn might_contain_hashed_key(&self, hash: u64) -> bool {
         self.bloom.contains_hash(hash)
+    }
+
+    fn load_block(&self, bm: &BlockMeta) -> Result<Arc<Block>, std::io::Error> {
+        let hk = BlockHashKey {
+            path: self.p.clone(),
+            start_offset: bm.start_offset,
+        };
+        match self.block_cache.get(&hk) {
+            Some(tr) => Ok(tr),
+            None => {
+                // print!(
+                //     "Creating block {} - {}\n",
+                //     self.p.display(),
+                //     bm.start_offset
+                // );
+                let mut br = self.f.lock().unwrap();
+                let mut block_data =
+                    vec![0u8; (bm.end_offset - bm.start_offset) as usize];
+                br.seek(SeekFrom::Start(bm.start_offset as u64))?;
+                br.read_exact(&mut block_data)?;
+                let block = Arc::new(Block::decode(&block_data));
+                self.block_cache.insert(hk, block.clone());
+                Ok(block)
+            }
+        }
     }
 
     fn load_bloom_filter(
@@ -144,15 +179,6 @@ impl TableReader {
 
         Ok(result)
     }
-
-    fn load_block(&self, bm: &BlockMeta) -> Result<Arc<Block>, std::io::Error> {
-        let mut br = self.f.lock().unwrap();
-        let mut block_data =
-            vec![0u8; (bm.end_offset - bm.start_offset) as usize];
-        br.seek(SeekFrom::Start(bm.start_offset as u64))?;
-        br.read_exact(&mut block_data)?;
-        Ok(Arc::new(Block::decode(&block_data)))
-    }
 }
 
 pub(crate) struct TableIterator {
@@ -177,7 +203,6 @@ impl TableIterator {
                 tr
             }
         };
-
         let first_block = tr.load_block(&tr.bm[0])?;
         Ok(TableIterator {
             tr,
