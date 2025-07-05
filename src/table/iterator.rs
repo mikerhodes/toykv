@@ -11,8 +11,10 @@ use std::{
     io::{BufReader, Error, Read, Seek, SeekFrom},
     ops::Bound,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
+
+use mini_moka::sync::Cache;
 
 use sbbf_rs_safe::Filter;
 
@@ -21,6 +23,14 @@ use crate::{
     table::BlockMeta,
 };
 
+static GLOBAL_CACHE: OnceLock<Cache<PathBuf, Arc<TableReader>>> =
+    OnceLock::new();
+
+fn get_cache() -> &'static Cache<PathBuf, Arc<TableReader>> {
+    GLOBAL_CACHE.get_or_init(|| Cache::builder().max_capacity(300).build())
+}
+
+#[derive(Debug)]
 struct TableReader {
     p: PathBuf,
     f: Mutex<BufReader<File>>,
@@ -157,7 +167,17 @@ impl TableIterator {
     /// Return a new TableIterator postioned at the
     /// start of the table.
     pub(crate) fn new(path: PathBuf) -> Result<TableIterator, Error> {
-        let tr = Arc::new(TableReader::new(path.clone())?);
+        let c = get_cache();
+        let tr = match c.get(&path) {
+            Some(tr) => tr,
+            None => {
+                // print!("Creating tr {}\n", path.to_str().unwrap());
+                let tr = Arc::new(TableReader::new(path.clone())?);
+                c.insert(path.clone(), tr.clone());
+                tr
+            }
+        };
+
         let first_block = tr.load_block(&tr.bm[0])?;
         Ok(TableIterator {
             tr,
