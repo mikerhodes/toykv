@@ -90,13 +90,11 @@ impl SSTables {
         self.sstables.get(k)
     }
 
-    pub(crate) fn iters(&self) -> Result<Vec<TableIterator>, Error> {
-        let mut vec = vec![];
-        for table_path in &self.sstables_index.levels.l0 {
-            let it = TableIterator::new(table_path.clone(), self.bloom_hasher)?;
-            vec.push(it);
-        }
-        Ok(vec)
+    pub(crate) fn iters(
+        &self,
+        k: Option<&[u8]>,
+    ) -> Result<Vec<TableIterator>, Error> {
+        self.sstables.iters(k)
     }
 }
 /// Iterate entries in an on-disk SSTable.
@@ -158,6 +156,20 @@ impl SSTablesReader {
         }
         // Otherwise, we didn't find it.
         Ok(None)
+    }
+
+    fn iters(&self, k: Option<&[u8]>) -> Result<Vec<TableIterator>, Error> {
+        let mut vec = vec![];
+        for tr in &self.tablereaders {
+            let t = match k {
+                Some(k) => {
+                    TableIterator::new_seeked_with_tablereader(tr.clone(), k)?
+                }
+                None => TableIterator::new_with_tablereader(tr.clone())?,
+            };
+            vec.push(t);
+        }
+        Ok(vec)
     }
 }
 

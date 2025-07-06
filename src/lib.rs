@@ -221,12 +221,7 @@ impl ToyKV {
         }
 
         // Add sstables to the merge iterator
-        let mut iters = self.sstables.iters()?;
-        if let Some(k) = start_key {
-            for t in &mut iters {
-                t.seek_to_key(k)?;
-            }
-        }
+        let iters = self.sstables.iters(start_key)?;
         for t in iters.into_iter() {
             m.add_iterator(t);
         }
