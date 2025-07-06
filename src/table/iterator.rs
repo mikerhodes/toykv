@@ -22,57 +22,42 @@ use crate::{
     table::BlockMeta,
 };
 
-pub(crate) struct TableIterator {
+struct TableReader {
     p: PathBuf,
     f: Mutex<BufReader<File>>,
     bm: Vec<BlockMeta>,
-    // current block
-    bi: BlockIterator,
     b_idx: usize,
     // bloom filter
     bloom: Filter,
-    hasher: SipHasher13,
 }
-
-impl TableIterator {
+impl TableReader {
     /// Return a new TableIterator postioned at the
     /// start of the table.
-    pub(crate) fn new(
-        path: PathBuf,
-        hasher: SipHasher13,
-    ) -> Result<TableIterator, Error> {
+    fn new(path: PathBuf) -> Result<TableReader, Error> {
         let f = OpenOptions::new().read(true).open(&path)?;
-        let mut br = Mutex::new(BufReader::with_capacity(8 * 1024, f));
-        let bm = TableIterator::load_block_meta(&mut br)?;
-        let bloom = TableIterator::load_bloom_filter(&mut br)?;
+        let br = Mutex::new(BufReader::with_capacity(8 * 1024, f));
+        let bm = TableReader::load_block_meta(&br)?;
+        let bloom = TableReader::load_bloom_filter(&br)?;
         assert!(bloom.is_some(), "could not load bloom filter from table");
-        let first_block = TableIterator::load_block(&mut br, &bm[0])?;
         {
             let mut br = br.lock().unwrap();
             br.rewind()?;
         }
-        Ok(TableIterator {
+        Ok(TableReader {
             f: br,
             p: path,
             bm,
-            bi: BlockIterator::create(first_block),
             b_idx: 0,
             bloom: bloom.unwrap(),
-            hasher,
         })
     }
 
-    // Use bloom filter to check whether key is in table (can false positive).
-    pub(crate) fn might_contain_key(&self, key: &[u8]) -> bool {
-        let hash = self.hasher.hash(key);
-        self.bloom.contains_hash(hash)
-    }
-    pub(crate) fn might_contain_hashed_key(&self, hash: u64) -> bool {
+    fn might_contain_hashed_key(&self, hash: u64) -> bool {
         self.bloom.contains_hash(hash)
     }
 
     fn load_bloom_filter(
-        f: &Mutex<BufReader<File>>,
+        mf: &Mutex<BufReader<File>>,
     ) -> Result<Option<Filter>, Error> {
         // File tail structure:
         //
@@ -81,7 +66,7 @@ impl TableIterator {
         // So to read the metadata we need to read:
         // file[metadata offset..bloom offset];
 
-        let mut f = f.lock().unwrap();
+        let mut f = mf.lock().unwrap();
 
         // First, get the end of the bloom filter by seeking
         let bloom_end_offset = f.seek(SeekFrom::End(-8))?;
@@ -103,7 +88,7 @@ impl TableIterator {
     /// load block metadata from a reader
     // TODO this should really be in a MetadataBlock encode/decode pair
     fn load_block_meta(
-        f: &Mutex<BufReader<File>>,
+        mf: &Mutex<BufReader<File>>,
     ) -> Result<Vec<BlockMeta>, Error> {
         // File tail structure:
         //
@@ -112,7 +97,7 @@ impl TableIterator {
         // So to read the metadata we need to read:
         // file[metadata offset..bloom offset];
 
-        let mut f = f.lock().unwrap();
+        let mut f = mf.lock().unwrap();
 
         // Read the two u32 offsets
         let mut u32bytebuf = [0u8; 4];
@@ -151,6 +136,45 @@ impl TableIterator {
         Ok(result)
     }
 
+    fn load_block(&self, bm: &BlockMeta) -> Result<Arc<Block>, std::io::Error> {
+        let mut br = self.f.lock().unwrap();
+        let mut block_data =
+            vec![0u8; (bm.end_offset - bm.start_offset) as usize];
+        br.seek(SeekFrom::Start(bm.start_offset as u64))?;
+        br.read_exact(&mut block_data)?;
+        Ok(Arc::new(Block::decode(&block_data)))
+    }
+}
+
+pub(crate) struct TableIterator {
+    p: PathBuf,
+    tr: Arc<TableReader>,
+    // current block
+    bi: BlockIterator,
+    b_idx: usize,
+}
+
+impl TableIterator {
+    /// Return a new TableIterator postioned at the
+    /// start of the table.
+    pub(crate) fn new(
+        path: PathBuf,
+        _hasher: SipHasher13,
+    ) -> Result<TableIterator, Error> {
+        let tr = Arc::new(TableReader::new(path.clone())?);
+        let first_block = tr.load_block(&tr.bm[0])?;
+        Ok(TableIterator {
+            tr,
+            p: path,
+            bi: BlockIterator::create(first_block),
+            b_idx: 0,
+        })
+    }
+
+    pub(crate) fn might_contain_hashed_key(&self, hash: u64) -> bool {
+        self.tr.might_contain_hashed_key(hash)
+    }
+
     /// Seek to a key in the table. next() will resume from
     /// the first entry with key, or the entry following where
     /// key would be.
@@ -175,7 +199,7 @@ impl TableIterator {
         }
 
         let mut left = 0;
-        let mut right = self.bm.len() - 1;
+        let mut right = self.tr.bm.len() - 1;
         let mut cut = 0;
         // dbg!(left, right, &key);
 
@@ -190,8 +214,8 @@ impl TableIterator {
                 break;
             }
 
-            let bm = &self.bm[cut];
-            let bm_next = &self.bm[cut + 1];
+            let bm = &self.tr.bm[cut];
+            let bm_next = &self.tr.bm[cut + 1];
 
             // TODO key is after last in table? Do we have a test?
             // Probably should get some edge case tests written.
@@ -218,7 +242,7 @@ impl TableIterator {
         // position tableiterator at selected block
         self.b_idx = cut;
         self.bi = BlockIterator::create_and_seek_to_key(
-            TableIterator::load_block(&self.f, &self.bm[cut])?,
+            self.tr.load_block(&self.tr.bm[cut])?,
             Bound::Included(&key[..]),
         );
 
@@ -227,38 +251,17 @@ impl TableIterator {
 
     fn rewind(&mut self) -> Result<(), Error> {
         self.b_idx = 0;
-        self.bi = BlockIterator::create(TableIterator::load_block(
-            &self.f,
-            &self.bm[0],
-        )?);
+        self.bi = BlockIterator::create(self.tr.load_block(&self.tr.bm[0])?);
         Ok(())
-    }
-
-    fn load_block(
-        br: &Mutex<BufReader<File>>,
-        bm: &BlockMeta,
-    ) -> Result<Arc<Block>, std::io::Error> {
-        let mut br = br.lock().unwrap();
-        let mut block_data =
-            vec![0u8; (bm.end_offset - bm.start_offset) as usize];
-        br.seek(SeekFrom::Start(bm.start_offset as u64))?;
-        br.read_exact(&mut block_data)?;
-        Ok(Arc::new(Block::decode(&block_data)))
     }
 
     fn load_next_block(&mut self) -> Result<Option<Arc<Block>>, Error> {
         self.b_idx += 1;
-        if self.b_idx >= self.bm.len() {
+        if self.b_idx >= self.tr.bm.len() {
             return Ok(None);
         }
-        let bm = &self.bm[self.b_idx];
-
-        let mut f = self.f.lock().unwrap();
-        let mut block_data =
-            vec![0u8; (bm.end_offset - bm.start_offset) as usize];
-        f.seek(SeekFrom::Start(bm.start_offset as u64))?;
-        f.read_exact(&mut block_data)?;
-        Ok(Some(Arc::new(Block::decode(&block_data))))
+        let bm = &self.tr.bm[self.b_idx];
+        Ok(Some(self.tr.load_block(bm)?))
     }
 }
 
