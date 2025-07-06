@@ -11,13 +11,14 @@ use std::{
     io::{Cursor, Error, Read},
     iter::repeat_with,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 const BLOOM_HASH_KEY: &[u8; 16] =
     &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
 use builder::TableBuilder;
-use iterator::TableIterator;
+use iterator::{TableIterator, TableReader};
 use siphasher::sip::SipHasher13;
 use tableindex::SSTableIndex;
 
@@ -102,7 +103,7 @@ impl SSTables {
 struct SSTablesReader {
     /// tables maintains a set of BufReaders on every sstable
     /// file in the set. This isn't that scalable.
-    tables: Vec<TableIterator>,
+    tablereaders: Vec<Arc<TableReader>>,
     bloom_hasher: SipHasher13,
 }
 
@@ -118,31 +119,32 @@ impl SSTablesReader {
         sstable_files: Vec<PathBuf>,
         bloom_hasher: SipHasher13,
     ) -> Result<SSTablesReader, Error> {
-        let mut tables: Vec<TableIterator> = vec![];
+        let mut tablereaders: Vec<Arc<TableReader>> = vec![];
         for p in sstable_files {
-            tables.push(TableIterator::new(p, bloom_hasher)?);
+            tablereaders.push(Arc::new(TableReader::new(p.clone())?));
         }
         Ok(SSTablesReader {
-            tables,
+            tablereaders,
             bloom_hasher,
         })
     }
 
     /// Search through the SSTables available to this reader for
     /// a key. Return an Option with its value.
-    fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
+    fn get(&self, k: &[u8]) -> Result<Option<KVValue>, Error> {
         // self.tables is in the right order for scanning the sstables
         // on disk. Read each to find k. If no SSTable file contains
         // k, return None.
         // let mut tables_searched = 0;
         let hash = self.bloom_hasher.hash(k);
-        for t in self
-            .tables
-            .iter_mut()
+        for tr in self
+            .tablereaders
+            .iter()
             .filter(|t| t.might_contain_hashed_key(hash))
         {
             // dbg!("t in tables");
             // tables_searched += 1;
+            let mut t = TableIterator::new_with_tablereader(tr.clone())?;
             t.seek_to_key(k)?;
             match t.next() {
                 Some(Ok(v)) if v.key == k => {

@@ -22,8 +22,8 @@ use crate::{
     table::BlockMeta,
 };
 
-struct TableReader {
-    p: PathBuf,
+pub(crate) struct TableReader {
+    pub(crate) p: PathBuf, // TODO remove pub after SSTablesReader doesn't need it
     f: Mutex<BufReader<File>>,
     bm: Vec<BlockMeta>,
     b_idx: usize,
@@ -33,7 +33,7 @@ struct TableReader {
 impl TableReader {
     /// Return a new TableIterator postioned at the
     /// start of the table.
-    fn new(path: PathBuf) -> Result<TableReader, Error> {
+    pub(crate) fn new(path: PathBuf) -> Result<TableReader, Error> {
         let f = OpenOptions::new().read(true).open(&path)?;
         let br = Mutex::new(BufReader::with_capacity(8 * 1024, f));
         let bm = TableReader::load_block_meta(&br)?;
@@ -52,7 +52,7 @@ impl TableReader {
         })
     }
 
-    fn might_contain_hashed_key(&self, hash: u64) -> bool {
+    pub(crate) fn might_contain_hashed_key(&self, hash: u64) -> bool {
         self.bloom.contains_hash(hash)
     }
 
@@ -147,7 +147,6 @@ impl TableReader {
 }
 
 pub(crate) struct TableIterator {
-    p: PathBuf,
     tr: Arc<TableReader>,
     // current block
     bi: BlockIterator,
@@ -165,7 +164,17 @@ impl TableIterator {
         let first_block = tr.load_block(&tr.bm[0])?;
         Ok(TableIterator {
             tr,
-            p: path,
+            bi: BlockIterator::create(first_block),
+            b_idx: 0,
+        })
+    }
+
+    pub(crate) fn new_with_tablereader(
+        tr: Arc<TableReader>,
+    ) -> Result<TableIterator, Error> {
+        let first_block = tr.load_block(&tr.bm[0])?;
+        Ok(TableIterator {
+            tr,
             bi: BlockIterator::create(first_block),
             b_idx: 0,
         })
