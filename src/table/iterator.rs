@@ -11,7 +11,7 @@ use std::{
     io::{BufReader, Error, Read, Seek, SeekFrom},
     ops::Bound,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use sbbf_rs_safe::Filter;
@@ -24,7 +24,7 @@ use crate::{
 
 pub(crate) struct TableIterator {
     p: PathBuf,
-    f: BufReader<File>,
+    f: Mutex<BufReader<File>>,
     bm: Vec<BlockMeta>,
     // current block
     bi: BlockIterator,
@@ -42,12 +42,15 @@ impl TableIterator {
         hasher: SipHasher13,
     ) -> Result<TableIterator, Error> {
         let f = OpenOptions::new().read(true).open(&path)?;
-        let mut br = BufReader::with_capacity(8 * 1024, f);
+        let mut br = Mutex::new(BufReader::with_capacity(8 * 1024, f));
         let bm = TableIterator::load_block_meta(&mut br)?;
         let bloom = TableIterator::load_bloom_filter(&mut br)?;
         assert!(bloom.is_some(), "could not load bloom filter from table");
         let first_block = TableIterator::load_block(&mut br, &bm[0])?;
-        br.rewind()?;
+        {
+            let mut br = br.lock().unwrap();
+            br.rewind()?;
+        }
         Ok(TableIterator {
             f: br,
             p: path,
@@ -69,7 +72,7 @@ impl TableIterator {
     }
 
     fn load_bloom_filter(
-        f: &mut BufReader<File>,
+        f: &Mutex<BufReader<File>>,
     ) -> Result<Option<Filter>, Error> {
         // File tail structure:
         //
@@ -77,6 +80,8 @@ impl TableIterator {
         //
         // So to read the metadata we need to read:
         // file[metadata offset..bloom offset];
+
+        let mut f = f.lock().unwrap();
 
         // First, get the end of the bloom filter by seeking
         let bloom_end_offset = f.seek(SeekFrom::End(-8))?;
@@ -98,7 +103,7 @@ impl TableIterator {
     /// load block metadata from a reader
     // TODO this should really be in a MetadataBlock encode/decode pair
     fn load_block_meta(
-        f: &mut BufReader<File>,
+        f: &Mutex<BufReader<File>>,
     ) -> Result<Vec<BlockMeta>, Error> {
         // File tail structure:
         //
@@ -106,6 +111,8 @@ impl TableIterator {
         //
         // So to read the metadata we need to read:
         // file[metadata offset..bloom offset];
+
+        let mut f = f.lock().unwrap();
 
         // Read the two u32 offsets
         let mut u32bytebuf = [0u8; 4];
@@ -211,7 +218,7 @@ impl TableIterator {
         // position tableiterator at selected block
         self.b_idx = cut;
         self.bi = BlockIterator::create_and_seek_to_key(
-            TableIterator::load_block(&mut self.f, &self.bm[cut])?,
+            TableIterator::load_block(&self.f, &self.bm[cut])?,
             Bound::Included(&key[..]),
         );
 
@@ -221,16 +228,17 @@ impl TableIterator {
     fn rewind(&mut self) -> Result<(), Error> {
         self.b_idx = 0;
         self.bi = BlockIterator::create(TableIterator::load_block(
-            &mut self.f,
+            &self.f,
             &self.bm[0],
         )?);
         Ok(())
     }
 
     fn load_block(
-        br: &mut BufReader<File>,
+        br: &Mutex<BufReader<File>>,
         bm: &BlockMeta,
     ) -> Result<Arc<Block>, std::io::Error> {
+        let mut br = br.lock().unwrap();
         let mut block_data =
             vec![0u8; (bm.end_offset - bm.start_offset) as usize];
         br.seek(SeekFrom::Start(bm.start_offset as u64))?;
@@ -244,10 +252,12 @@ impl TableIterator {
             return Ok(None);
         }
         let bm = &self.bm[self.b_idx];
+
+        let mut f = self.f.lock().unwrap();
         let mut block_data =
             vec![0u8; (bm.end_offset - bm.start_offset) as usize];
-        self.f.seek(SeekFrom::Start(bm.start_offset as u64))?;
-        self.f.read_exact(&mut block_data)?;
+        f.seek(SeekFrom::Start(bm.start_offset as u64))?;
+        f.read_exact(&mut block_data)?;
         Ok(Some(Arc::new(Block::decode(&block_data))))
     }
 }
