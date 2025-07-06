@@ -144,8 +144,9 @@ impl SSTablesReader {
         {
             // dbg!("t in tables");
             // tables_searched += 1;
-            let mut t = TableIterator::new_with_tablereader(tr.clone())?;
-            t.seek_to_key(k)?;
+            let mut t =
+                TableIterator::new_seeked_with_tablereader(tr.clone(), k)?;
+            // t.seek_to_key(k)?;
             match t.next() {
                 Some(Ok(v)) if v.key == k => {
                     // dbg!(tables_searched);

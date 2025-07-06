@@ -180,14 +180,31 @@ impl TableIterator {
         })
     }
 
+    pub(crate) fn new_seeked_with_tablereader(
+        tr: Arc<TableReader>,
+        key: &[u8],
+    ) -> Result<TableIterator, Error> {
+        let seeked_block_idx = TableIterator::seek_to_key_int(&tr.bm, key)?;
+        // position tableiterator at selected block
+        let bi = BlockIterator::create_and_seek_to_key(
+            tr.load_block(&tr.bm[seeked_block_idx])?,
+            Bound::Included(&key[..]),
+        );
+        Ok(TableIterator {
+            tr,
+            bi,
+            b_idx: seeked_block_idx,
+        })
+    }
+
     pub(crate) fn might_contain_hashed_key(&self, hash: u64) -> bool {
         self.tr.might_contain_hashed_key(hash)
     }
 
-    /// Seek to a key in the table. next() will resume from
-    /// the first entry with key, or the entry following where
-    /// key would be.
-    pub(crate) fn seek_to_key(&mut self, key: &[u8]) -> Result<(), Error> {
+    fn seek_to_key_int(
+        idx: &Vec<BlockMeta>,
+        key: &[u8],
+    ) -> Result<usize, Error> {
         // TODO Use Bound for key to seek to. I wonder if it's easier
         // when using excluded start key to instead bump the key up
         // to the next value by incrementing the last byte. No,
@@ -202,13 +219,10 @@ impl TableIterator {
         // After finding the block, set an attr on the iterator for the
         // seeked key, so that next() can skip until it gets there.
 
-        if key.len() == 0 {
-            // All keys are greater than a null key
-            return self.rewind();
-        }
+        assert!(key.len() > 0, "key length must be >0");
 
         let mut left = 0;
-        let mut right = self.tr.bm.len() - 1;
+        let mut right = idx.len() - 1;
         let mut cut = 0;
         // dbg!(left, right, &key);
 
@@ -223,8 +237,8 @@ impl TableIterator {
                 break;
             }
 
-            let bm = &self.tr.bm[cut];
-            let bm_next = &self.tr.bm[cut + 1];
+            let bm = &idx[cut];
+            let bm_next = &idx[cut + 1];
 
             // TODO key is after last in table? Do we have a test?
             // Probably should get some edge case tests written.
@@ -247,6 +261,20 @@ impl TableIterator {
                 left = cut + 1;
             }
         }
+
+        Ok(cut)
+    }
+
+    /// Seek to a key in the table. next() will resume from
+    /// the first entry with key, or the entry following where
+    /// key would be.
+    pub(crate) fn seek_to_key(&mut self, key: &[u8]) -> Result<(), Error> {
+        if key.len() == 0 {
+            // All keys are greater than a null key
+            return self.rewind();
+        }
+
+        let cut = TableIterator::seek_to_key_int(&self.tr.bm, key)?;
 
         // position tableiterator at selected block
         self.b_idx = cut;
