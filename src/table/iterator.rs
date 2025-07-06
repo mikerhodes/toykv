@@ -1,11 +1,12 @@
 #![allow(dead_code)]
 // sstable format:
-// --------------------------------------------------------------------------
-// |  Block Section   |        Meta Section       |          Extra          |
-// --------------------------------------------------------------------------
-// | data block | ... |          metadata         | meta block offset (u32) |
-// --------------------------------------------------------------------------
-
+// -----------------------------------------------------------------------------
+// |  Block Section   | Meta Section     |          Offsets                     |
+// -----------------------------------------------------------------------------
+// | data block | ... | bloom | metadata | bloom (u32) | block meta index (u32) |
+// -----------------------------------------------------------------------------
+//                    ^-------^--------------                   |
+//                            `---------------------------------/
 use std::{
     fs::{File, OpenOptions},
     io::{BufReader, Error, Read, Seek, SeekFrom},
@@ -26,7 +27,6 @@ pub(crate) struct TableReader {
     pub(crate) p: PathBuf, // TODO remove pub after SSTablesReader doesn't need it
     f: Mutex<BufReader<File>>,
     bm: Vec<BlockMeta>,
-    b_idx: usize,
     // bloom filter
     bloom: Filter,
 }
@@ -35,7 +35,8 @@ impl TableReader {
     /// start of the table.
     pub(crate) fn new(path: PathBuf) -> Result<TableReader, Error> {
         let f = OpenOptions::new().read(true).open(&path)?;
-        let br = Mutex::new(BufReader::with_capacity(8 * 1024, f));
+        let br =
+            Mutex::new(BufReader::with_capacity(8 * 1024 /* 8kib */, f));
         let bm = TableReader::load_block_meta(&br)?;
         let bloom = TableReader::load_bloom_filter(&br)?;
         assert!(bloom.is_some(), "could not load bloom filter from table");
@@ -47,7 +48,6 @@ impl TableReader {
             f: br,
             p: path,
             bm,
-            b_idx: 0,
             bloom: bloom.unwrap(),
         })
     }
