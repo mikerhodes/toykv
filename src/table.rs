@@ -86,7 +86,7 @@ impl SSTables {
 
     /// Retrieve the latest value for `k` in the on disk
     /// set of sstables.
-    pub(crate) fn get(&mut self, k: &[u8]) -> Result<Option<KVValue>, Error> {
+    pub(crate) fn get(&self, k: &[u8]) -> Result<Option<KVValue>, Error> {
         self.sstables.get(k)
     }
 

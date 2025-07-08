@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::BTreeMap, io::Error, ops::Bound, path::Path};
 
 use error::ToyKVError;
@@ -22,10 +23,10 @@ pub enum WALSync {
 
 #[derive(Default)]
 pub struct ToyKVMetrics {
-    pub sst_flushes: u64,
-    pub reads: u64,
-    pub writes: u64,
-    pub deletes: u64,
+    pub sst_flushes: AtomicU64,
+    pub reads: AtomicU64,
+    pub writes: AtomicU64,
+    pub deletes: AtomicU64,
 }
 
 pub struct ToyKV {
@@ -127,7 +128,7 @@ impl ToyKV {
         if v.len() > MAX_VALUE_SIZE {
             return Err(ToyKVError::ValueTooLarge);
         }
-        self.metrics.writes += 1;
+        self.metrics.writes.fetch_add(1, Ordering::Relaxed);
         self.write(k, kvrecord::KVValue::Some(v))
     }
 
@@ -143,7 +144,7 @@ impl ToyKV {
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
-        self.metrics.deletes += 1;
+        self.metrics.deletes.fetch_add(1, Ordering::Relaxed);
         self.write(k, KVValue::Deleted)
     }
 
@@ -155,13 +156,13 @@ impl ToyKV {
             self.sstables.write_new_sstable(&self.memtable)?;
             self.wal.reset()?;
             self.memtable.clear();
-            self.metrics.sst_flushes += 1;
+            self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
 
     /// Get the value for k.
-    pub fn get<S>(&mut self, k: S) -> Result<Option<Vec<u8>>, ToyKVError>
+    pub fn get<S>(&self, k: S) -> Result<Option<Vec<u8>>, ToyKVError>
     where
         S: Into<Vec<u8>>,
     {
@@ -188,7 +189,7 @@ impl ToyKV {
             },
         };
 
-        self.metrics.reads += 1;
+        self.metrics.reads.fetch_add(1, Ordering::Relaxed);
         Ok(r)
     }
     /// Perform a graceful shutdown.
@@ -197,6 +198,8 @@ impl ToyKV {
     // /// Immediately terminate (for use during testing, "pretend to crash")
     // pub(crate) fn terminate(&mut self) {}
 
+    // scan has a lifetime parameter to ensure that the resulting
+    // iterator cannot outlive the toykv instance.
     pub fn scan<'a>(
         &'a self,
         start_key: Option<&'a [u8]>,

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Arc, thread, time::Instant};
 
 use toykv::{error::ToyKVError, ToyKVBuilder};
 
@@ -50,7 +50,7 @@ fn main() -> Result<(), ToyKVError> {
     db.shutdown();
 
     // See how read time is affected if we open a new database
-    let mut db = toykv::open(tmp_dir.path())?;
+    let db = Arc::new(toykv::open(tmp_dir.path())?);
     let now = Instant::now();
     for n in 1..(writes + 1) {
         let got = db.get(n.to_be_bytes().as_slice())?;
@@ -66,6 +66,32 @@ fn main() -> Result<(), ToyKVError> {
         writes,
         elapsed_time.as_millis(),
         ((elapsed_time / writes).as_micros()) as f64 / 1000.0
+    );
+
+    let now = Instant::now();
+    thread::scope(|s| {
+        // Four background threads to get 10000 values each.
+        for _ in 0..4 {
+            let db = db.clone();
+            s.spawn(move || {
+                for i in 1..writes {
+                    let n: u32 = i;
+                    let got = db.get(n.to_be_bytes().as_slice()).unwrap();
+                    assert_eq!(
+                        got.unwrap(),
+                        n.to_le_bytes().as_slice(),
+                        "Did not read back what we put in"
+                    );
+                }
+            });
+        }
+    });
+    let elapsed_time = now.elapsed();
+    println!(
+        "Running spawned read() {} times took {}ms ({}ms per read).",
+        writes * 4,
+        elapsed_time.as_millis(),
+        ((elapsed_time / (writes * 4)).as_micros()) as f64 / 1000.0
     );
 
     Ok(())
