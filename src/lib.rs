@@ -1,5 +1,10 @@
+use crossbeam_skiplist::map::Entry;
+use crossbeam_skiplist::SkipMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{collections::BTreeMap, io::Error, ops::Bound, path::Path};
+use std::sync::{Arc, RwLock};
+use std::{io::Error, ops::Bound, path::Path};
+
+use ouroboros::self_referencing;
 
 use error::ToyKVError;
 use kvrecord::{KVRecord, KVValue};
@@ -31,11 +36,16 @@ pub struct ToyKVMetrics {
 
 pub struct ToyKV {
     /// d is the folder that the KV store owns.
-    memtable: BTreeMap<Vec<u8>, KVValue>,
-    wal: WAL,
-    sstables: SSTables,
     pub metrics: ToyKVMetrics,
     wal_write_threshold: u64,
+    state: RwLock<ToyKVState>,
+}
+
+/// ToyKVState is the modifiable state of the database.
+struct ToyKVState {
+    memtable: Arc<SkipMap<Vec<u8>, KVValue>>,
+    wal: WAL,
+    sstables: SSTables,
 }
 
 struct ToyKVOptions {
@@ -90,9 +100,11 @@ impl ToyKVBuilder {
         let memtable = wal.replay()?;
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
-            memtable,
-            wal,
-            sstables,
+            state: RwLock::new(ToyKVState {
+                memtable: Arc::new(memtable),
+                wal,
+                sstables,
+            }),
             metrics: Default::default(),
             wal_write_threshold: self.options.wal_write_threshold,
         })
@@ -109,7 +121,7 @@ const MAX_VALUE_SIZE: usize = 102_400; // 100kb
 
 impl ToyKV {
     /// Set key k to v.
-    pub fn set<S, T>(&mut self, k: S, v: T) -> Result<(), ToyKVError>
+    pub fn set<S, T>(&self, k: S, v: T) -> Result<(), ToyKVError>
     where
         S: Into<Vec<u8>>,
         T: Into<Vec<u8>>,
@@ -133,7 +145,7 @@ impl ToyKV {
     }
 
     /// Delete the stored value for k.
-    pub fn delete<S>(&mut self, k: S) -> Result<(), ToyKVError>
+    pub fn delete<S>(&self, k: S) -> Result<(), ToyKVError>
     where
         S: Into<Vec<u8>>,
     {
@@ -149,13 +161,17 @@ impl ToyKV {
     }
 
     /// Internal method to write a KVValue to WAL and memtable
-    fn write(&mut self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
-        self.wal.write(&k, (&v).into())?;
-        self.memtable.insert(k, v);
-        if self.wal.wal_writes >= self.wal_write_threshold {
-            self.sstables.write_new_sstable(&self.memtable)?;
-            self.wal.reset()?;
-            self.memtable.clear();
+    fn write(&self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
+        let mut state = self.state.write().unwrap();
+
+        state.wal.write(&k, (&v).into())?;
+        state.memtable.insert(k, v);
+        if state.wal.wal_writes >= self.wal_write_threshold {
+            let memtable = &state.memtable;
+            let fname = state.sstables.write_new_sstable(&memtable)?;
+            state.sstables.commit_new_sstable(fname)?;
+            state.wal.reset()?;
+            state.memtable.clear();
             self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
@@ -173,11 +189,15 @@ impl ToyKV {
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
-        let r = self.memtable.get(&k);
+
+        let state = self.state.read().unwrap();
+        let mt = state.memtable.clone();
+        let r = mt.get(&k);
         let r = match r {
-            Some(r) => Some(r.to_owned()),
-            None => self.sstables.get(&k)?,
+            Some(r) => Some(r.value().to_owned()),
+            None => state.sstables.get(&k)?,
         };
+        drop(state);
 
         // This is the moment where we consume the KVValue::Deleted
         // to hide it from the caller.
@@ -203,33 +223,76 @@ impl ToyKV {
     pub fn scan<'a>(
         &'a self,
         start_key: Option<&'a [u8]>,
-        end_key: Bound<&'a [u8]>,
-    ) -> Result<KVIterator<'a>, Error> {
-        let mut m = MergeIterator::<'a>::new(end_key);
+        end_key: Bound<Vec<u8>>,
+    ) -> Result<KVIterator, Error> {
+        let lower_bound = match start_key {
+            None => Bound::Unbounded,
+            Some(k) => Bound::Included(k.to_vec()),
+        };
 
-        // Add memtable(s) to the merge iterator
-        fn map_fun(
-            (key, value): (&Vec<u8>, &KVValue),
-        ) -> Result<KVRecord, Error> {
-            Ok(KVRecord {
-                key: key.clone(),
-                value: value.clone(),
-            })
-        }
-        if let Some(k) = start_key {
-            let r = self.memtable.range(k.to_vec()..);
-            m.add_iterator(r.map(map_fun));
-        } else {
-            m.add_iterator(self.memtable.iter().map(map_fun));
-        }
+        let state = self.state.read().unwrap();
+        let mt = state.memtable.clone();
+        let iters = state.sstables.iters(start_key)?;
+        drop(state);
 
-        // Add sstables to the merge iterator
-        let iters = self.sstables.iters(start_key)?;
+        let mut m = MergeIterator::<'a>::new(end_key.clone());
+
+        let mti = MemtableIteratorBuilder {
+            memtable: mt,
+            it_builder: |mt| mt.range((lower_bound, end_key)),
+        }
+        .build();
+        m.add_iterator(mti);
+
         for t in iters.into_iter() {
             m.add_iterator(t);
         }
 
         Ok(KVIterator { i: m })
+    }
+}
+
+// Make this a type because it's so long to write out
+type SkipMapRangeIter<'a> = crossbeam_skiplist::map::Range<
+    'a,
+    Vec<u8>,
+    (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    Vec<u8>,
+    KVValue,
+>;
+
+// I realised quite quickly that I needed to somehow put the memtable Arc
+// clone into a struct alongside the iterator that borrowed it. But I
+// couldn't for the life of me construct something that the compiler
+// would accept; usually I could see why. It took me a while to figure
+// out that I needed a crate to help with it.
+#[self_referencing]
+struct MemtableIterator {
+    memtable: Arc<SkipMap<Vec<u8>, KVValue>>,
+    #[borrows(memtable)]
+    #[not_covariant]
+    it: SkipMapRangeIter<'this>,
+}
+
+impl MemtableIterator {
+    fn entry_to_kvrecord(
+        entry: Entry<Vec<u8>, KVValue>,
+    ) -> Result<KVRecord, Error> {
+        Ok(KVRecord {
+            key: entry.key().clone(),
+            value: entry.value().clone(),
+        })
+    }
+}
+
+impl Iterator for MemtableIterator {
+    type Item = Result<KVRecord, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.with_it_mut(|iter| match iter.next() {
+            None => None,
+            Some(entry) => Some(MemtableIterator::entry_to_kvrecord(entry)),
+        })
     }
 }
 

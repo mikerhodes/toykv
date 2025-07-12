@@ -1,7 +1,7 @@
 // Implements a simple WAL for the database's memtable.
 
+use crossbeam_skiplist::SkipMap;
 use std::{
-    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{BufReader, Error, Read, Seek, Write},
     path::{Path, PathBuf},
@@ -69,12 +69,12 @@ impl WAL {
     /// Replays the WAL into a memtable. Call this first.
     pub(crate) fn replay(
         &mut self,
-    ) -> Result<BTreeMap<Vec<u8>, KVValue>, ToyKVError> {
+    ) -> Result<SkipMap<Vec<u8>, KVValue>, ToyKVError> {
         if self.f.is_some() {
             return Err(ToyKVError::BadWALState);
         }
 
-        let mut memtable = BTreeMap::new();
+        let memtable = SkipMap::new();
 
         let file = match OpenOptions::new()
             .read(true)
