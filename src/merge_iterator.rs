@@ -17,11 +17,11 @@ pub(crate) struct MergeIterator<'a> {
     /// lsmtables are the memtables and sstables underlying this MergeIterator
     lsmtables: Vec<Peekable<TableIterator<'a>>>,
     stopped: bool,
-    end_key: Bound<&'a [u8]>,
+    end_key: Bound<Vec<u8>>,
 }
 
 impl<'a> MergeIterator<'a> {
-    pub fn new(end_key: Bound<&'a [u8]>) -> Self {
+    pub fn new(end_key: Bound<Vec<u8>>) -> Self {
         Self {
             lsmtables: Vec::new(),
             stopped: false,
@@ -99,11 +99,11 @@ impl<'a> Iterator for MergeIterator<'a> {
         // If we have reached the ends of the bounds
         // set, update min to None
         if let Some(Ok(next_record)) = min.as_ref() {
-            min = match self.end_key {
+            min = match &self.end_key {
                 Bound::Unbounded => min,
-                Bound::Included(x) if &next_record.key[..] > x => None,
+                Bound::Included(x) if next_record.key > *x => None,
                 Bound::Included(_) => min,
-                Bound::Excluded(x) if &next_record.key[..] >= x => None,
+                Bound::Excluded(x) if next_record.key >= *x => None,
                 Bound::Excluded(_) => min,
             }
         }
@@ -154,7 +154,7 @@ mod tests_merge_iterator {
         let kvr = kv("foo", "bar");
         let expected = kvr.clone();
         let sstable = vec![Ok(kvr)];
-        let mut mt = MergeIterator::new(Bound::Included("foo".as_bytes()));
+        let mut mt = MergeIterator::new(Bound::Included("foo".into()));
         mt.add_iterator(sstable.into_iter());
         assert_eq!(mt.next(), Some(Ok(expected)));
         Ok(())
@@ -164,7 +164,7 @@ mod tests_merge_iterator {
     fn test_merge_one_vec_bound_excluded() -> Result<(), Error> {
         let kvr = kv("foo", "bar");
         let sstable = vec![Ok(kvr)];
-        let mut mt = MergeIterator::new(Bound::Excluded("foo".as_bytes()));
+        let mut mt = MergeIterator::new(Bound::Excluded("foo".into()));
         mt.add_iterator(sstable.into_iter());
         assert_eq!(mt.next(), None);
         Ok(())
@@ -190,7 +190,7 @@ mod tests_merge_iterator {
     fn test_merge_two_unique_vecs_bound_included() -> Result<(), Error> {
         let sstable1 = vec![Ok(kv("aaaa", "barA")), Ok(kv("cccc", "barC"))];
         let sstable2 = vec![Ok(kv("bbbb", "barB")), Ok(kv("dddd", "barD"))];
-        let mut mt = MergeIterator::new(Bound::Included("cccc".as_bytes()));
+        let mut mt = MergeIterator::new(Bound::Included("cccc".into()));
         mt.add_iterator(sstable1.into_iter());
         mt.add_iterator(sstable2.into_iter());
         assert_eq!(mt.next(), Some(Ok(kv("aaaa", "barA"))));
@@ -204,7 +204,7 @@ mod tests_merge_iterator {
     fn test_merge_two_unique_vecs_bound_excluded() -> Result<(), Error> {
         let sstable1 = vec![Ok(kv("aaaa", "barA")), Ok(kv("cccc", "barC"))];
         let sstable2 = vec![Ok(kv("bbbb", "barB")), Ok(kv("dddd", "barD"))];
-        let mut mt = MergeIterator::new(Bound::Excluded("cccc".as_bytes()));
+        let mut mt = MergeIterator::new(Bound::Excluded("cccc".into()));
         mt.add_iterator(sstable1.into_iter());
         mt.add_iterator(sstable2.into_iter());
         assert_eq!(mt.next(), Some(Ok(kv("aaaa", "barA"))));

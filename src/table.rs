@@ -6,8 +6,8 @@
 // | data block | ... |          metadata         | meta block offset (u32) |
 // --------------------------------------------------------------------------
 
+use crossbeam_skiplist::SkipMap;
 use std::{
-    collections::BTreeMap,
     io::{Cursor, Error, Read},
     iter::repeat_with,
     path::{Path, PathBuf},
@@ -25,7 +25,7 @@ use tableindex::SSTableIndex;
 use crate::kvrecord::KVValue;
 
 mod builder;
-mod iterator;
+pub mod iterator;
 mod tableindex;
 
 /// Manage and search a set of SSTable files on disk.
@@ -60,17 +60,24 @@ impl SSTables {
     /// of the memtable are durable on disk and are used
     /// by future calls to `get`.
     pub(crate) fn write_new_sstable(
-        &mut self,
-        memtable: &BTreeMap<Vec<u8>, KVValue>,
-    ) -> Result<(), Error> {
+        &self,
+        memtable: &SkipMap<Vec<u8>, KVValue>,
+    ) -> Result<PathBuf, Error> {
         let fname = next_sstable_fname(self.d.as_path());
 
         let mut sst = TableBuilder::new(self.bloom_hasher, memtable.len());
         for entry in memtable {
-            assert!(sst.add(entry.0, &entry.1.into()).is_ok());
+            assert!(sst.add(entry.key(), &entry.value().into()).is_ok());
         }
         sst.write(fname.as_path())?;
 
+        Ok(fname)
+    }
+
+    pub(crate) fn commit_new_sstable(
+        &mut self,
+        fname: PathBuf,
+    ) -> Result<(), Error> {
         // Commit the new sstable to the index.
         self.sstables_index.levels.l0.insert(0, fname);
         self.sstables_index.write()?;

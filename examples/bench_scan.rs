@@ -39,7 +39,7 @@ fn main() -> Result<(), ToyKVError> {
         let ek = (n + 100).to_be_bytes();
         let got = db.scan(
             Some(sk.as_slice()),
-            std::ops::Bound::Excluded(ek.as_slice()),
+            std::ops::Bound::Excluded(ek.to_vec()),
         )?;
         let mut c = 0;
         for _ in got {
