@@ -62,8 +62,8 @@ impl Default for ToyKVOptions {
     fn default() -> Self {
         Self {
             wal_sync: WALSync::Full,
-            wal_write_threshold: 5_000, // At 50kb kv pairs, 256MB
-                                        // max_sstable_size: 16 * 1024 * 1024,
+            wal_write_threshold: 250_000, // At 1kb kv pairs, 256MB
+                                          // max_sstable_size: 16 * 1024 * 1024,
         }
     }
 }
