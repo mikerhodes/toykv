@@ -25,7 +25,7 @@
 
 use std::io::{Cursor, Read};
 
-use crate::kvrecord::KVWriteValue;
+use crate::kvrecord::KVValue;
 
 const BLOCK_SIZE: usize = 4096;
 
@@ -62,7 +62,7 @@ impl BlockBuilder {
     pub(crate) fn add(
         &mut self,
         key: &[u8],
-        value: &KVWriteValue,
+        value: &KVValue,
     ) -> Result<(), BlockBuilderError> {
         // Make sure we don't change BLOCK_SIZE and make it too big by accident.
         assert!(BLOCK_SIZE < u16::MAX as usize);
@@ -71,7 +71,7 @@ impl BlockBuilder {
         if key.len() == 0 {
             return Err(BlockBuilderError::KeyEmpty);
         }
-        if let KVWriteValue::Some(x) = value {
+        if let KVValue::Some(x) = value {
             if x.len() == 0 {
                 return Err(BlockBuilderError::ValueEmpty); // use Deleted instead
             }
@@ -80,7 +80,7 @@ impl BlockBuilder {
         if key.len() > u16::MAX as usize {
             return Err(BlockBuilderError::KeyTooLarge);
         }
-        if let KVWriteValue::Some(x) = value {
+        if let KVValue::Some(x) = value {
             if x.len() > u16::MAX as usize {
                 return Err(BlockBuilderError::ValueTooLarge);
             }
@@ -99,8 +99,8 @@ impl BlockBuilder {
         let e = Entry {
             key: key.to_vec(),
             value: match value {
-                KVWriteValue::Some(x) => x.to_vec(),
-                KVWriteValue::Deleted => vec![],
+                KVValue::Some(x) => x.clone(),
+                KVValue::Deleted => vec![],
             },
         };
 
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn test_block_builder_add_single_entry() {
         let mut builder = BlockBuilder::new();
-        let result = builder.add(b"key", &KVWriteValue::Some(b"value"));
+        let result = builder.add(b"key", &KVValue::Some(b"value".into()));
         assert!(result.is_ok());
 
         let block = builder.build();
@@ -325,11 +325,11 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         // Add first entry
-        let result1 = builder.add(b"key1", &KVWriteValue::Some(b"value1"));
+        let result1 = builder.add(b"key1", &KVValue::Some(b"value1".into()));
         assert!(result1.is_ok());
 
         // Add second entry
-        let result2 = builder.add(b"key2", &KVWriteValue::Some(b"value2"));
+        let result2 = builder.add(b"key2", &KVValue::Some(b"value2".into()));
         assert!(result2.is_ok());
 
         let block = builder.build();
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn test_block_builder_add_deleted_value() {
         let mut builder = BlockBuilder::new();
-        let result = builder.add(b"deleted_key", &KVWriteValue::Deleted);
+        let result = builder.add(b"deleted_key", &KVValue::Deleted);
         assert!(result.is_ok());
 
         let block = builder.build();
@@ -357,7 +357,7 @@ mod tests {
     fn test_block_builder_key_too_large() {
         let mut builder = BlockBuilder::new();
         let large_key = vec![b'x'; (u16::MAX as usize) + 1];
-        let result = builder.add(&large_key, &KVWriteValue::Some(b"value"));
+        let result = builder.add(&large_key, &KVValue::Some(b"value".into()));
 
         assert!(matches!(result, Err(BlockBuilderError::KeyTooLarge)));
     }
@@ -366,7 +366,7 @@ mod tests {
     fn test_block_builder_value_too_large() {
         let mut builder = BlockBuilder::new();
         let large_value = vec![b'x'; (u16::MAX as usize) + 1];
-        let result = builder.add(b"key", &KVWriteValue::Some(&large_value));
+        let result = builder.add(b"key", &KVValue::Some(large_value));
 
         assert!(matches!(result, Err(BlockBuilderError::ValueTooLarge)));
     }
@@ -376,7 +376,7 @@ mod tests {
         let mut builder = BlockBuilder::new();
         let max_key = vec![b'k'; u16::MAX as usize];
         let max_value = vec![b'v'; u16::MAX as usize];
-        let result = builder.add(&max_key, &KVWriteValue::Some(&max_value));
+        let result = builder.add(&max_key, &KVValue::Some(max_value));
 
         // Should succeed with maximum sizes
         assert!(result.is_ok());
@@ -389,7 +389,7 @@ mod tests {
         let large_key = vec![b'k'; 2000];
         let large_value = vec![b'v'; 3000]; // Total entry > 4096 bytes
 
-        let result = builder.add(&large_key, &KVWriteValue::Some(&large_value));
+        let result = builder.add(&large_key, &KVValue::Some(large_value));
         assert!(result.is_ok()); // First entry should succeed even if large
 
         let block = builder.build();
@@ -403,12 +403,11 @@ mod tests {
         // Add a large first entry (close to BLOCK_SIZE)
         let large_key = vec![b'a'; 2000];
         let large_value = vec![b'v'; 2085]; // ~4085 bytes + 4 byte overhead
-        let result1 =
-            builder.add(&large_key, &KVWriteValue::Some(&large_value));
+        let result1 = builder.add(&large_key, &KVValue::Some(large_value));
         assert!(result1.is_ok());
 
         // Try to add another entry that would exceed BLOCK_SIZE
-        let result2 = builder.add(b"key2", &KVWriteValue::Some(b"value2"));
+        let result2 = builder.add(b"key2", &KVValue::Some(b"value2".into()));
         assert!(matches!(result2, Err(BlockBuilderError::BlockFull)));
     }
 
@@ -422,11 +421,10 @@ mod tests {
         // Set our range loop larger to ensure we exit.
         for i in 0..500 {
             let key = format!("key{:03}", i);
-            let value = format!("value{:03}", i);
+            let value = format!("value{:03}", i).as_bytes().to_vec();
+            let kv = KVValue::Some(value);
 
-            match builder
-                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
-            {
+            match builder.add(key.as_bytes(), &kv) {
                 Ok(()) => entries_added += 1,
                 Err(BlockBuilderError::BlockFull) => break,
                 Err(e) => panic!("Unexpected error: {:?}", e),
@@ -447,9 +445,9 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         // Add entries of known sizes
-        builder.add(b"a", &KVWriteValue::Some(b"1")).unwrap(); // 2+1+2+1 = 6 bytes
-        builder.add(b"bb", &KVWriteValue::Some(b"22")).unwrap(); // 2+2+2+2 = 8 bytes
-        builder.add(b"ccc", &KVWriteValue::Some(b"333")).unwrap(); // 2+3+2+3 = 10 bytes
+        builder.add(b"a", &KVValue::Some(b"1".into())).unwrap(); // 2+1+2+1 = 6 bytes
+        builder.add(b"bb", &KVValue::Some(b"22".into())).unwrap(); // 2+2+2+2 = 8 bytes
+        builder.add(b"ccc", &KVValue::Some(b"333".into())).unwrap(); // 2+3+2+3 = 10 bytes
 
         let block = builder.build();
         assert_eq!(block.offsets.len(), 3);
@@ -463,16 +461,16 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         // len 8 + 2 + 0 + 2 = 12
-        builder.add(b"1deleted", &KVWriteValue::Deleted).unwrap();
+        builder.add(b"1deleted", &KVValue::Deleted).unwrap();
         // len 5+2+5+2 = 14
         builder
-            .add(b"1live", &KVWriteValue::Some(b"data1"))
+            .add(b"1live", &KVValue::Some(b"data1".into()))
             .unwrap();
         // len 12
-        builder.add(b"2deleted", &KVWriteValue::Deleted).unwrap();
+        builder.add(b"2deleted", &KVValue::Deleted).unwrap();
         // len 14
         builder
-            .add(b"2live", &KVWriteValue::Some(b"data2"))
+            .add(b"2live", &KVValue::Some(b"data2".into()))
             .unwrap();
 
         let block = builder.build();
@@ -496,19 +494,19 @@ mod tests {
 
         // Zero-length key, normal value
         assert_eq!(
-            builder.add(b"", &KVWriteValue::Some(b"value")),
+            builder.add(b"", &KVValue::Some(b"value".into())),
             Err(BlockBuilderError::KeyEmpty)
         );
 
         // Normal key, zero-length value
         assert_eq!(
-            builder.add(b"key", &KVWriteValue::Some(b"")),
+            builder.add(b"key", &KVValue::Some(b"".into())),
             Err(BlockBuilderError::ValueEmpty)
         );
 
         // Zero-length key and value
         assert_eq!(
-            builder.add(b"", &KVWriteValue::Some(b"")),
+            builder.add(b"", &KVValue::Some(b"".into())),
             Err(BlockBuilderError::KeyEmpty)
         );
     }
@@ -525,7 +523,7 @@ mod tests {
             let key = format!("keykeykey{:05}", i);
             let value = format!("valuevalue{:04}", i);
             let result = builder
-                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()));
+                .add(key.as_bytes(), &KVValue::Some(value.as_bytes().to_vec()));
             assert!(
                 result.is_ok(),
                 "Failed to add entry {} at size {}",
@@ -535,7 +533,8 @@ mod tests {
         }
 
         // The next entry should fail due to block being full
-        let result = builder.add(b"overflow", &KVWriteValue::Some(b"overflow"));
+        let result =
+            builder.add(b"overflow", &KVValue::Some(b"overflow".into()));
         assert!(matches!(result, Err(BlockBuilderError::BlockFull)));
 
         let block = builder.build();
@@ -547,10 +546,10 @@ mod tests {
     fn test_block_encode() {
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"key1", &KVWriteValue::Some(b"value1"))
+            .add(b"key1", &KVValue::Some(b"value1".into()))
             .unwrap();
         builder
-            .add(b"key2", &KVWriteValue::Some(b"value2"))
+            .add(b"key2", &KVValue::Some(b"value2".into()))
             .unwrap();
 
         let block = builder.build();
@@ -589,18 +588,21 @@ mod tests {
 
         // Test a realistic scenario with mixed entry sizes
         let test_data = vec![
-            (b"config:retries".as_slice(), &KVWriteValue::Some(b"3")),
-            (b"config:timeout".as_slice(), &KVWriteValue::Some(b"30")),
-            (b"deleted_user:old".as_slice(), &KVWriteValue::Deleted),
-            (b"session:abc123".as_slice(), &KVWriteValue::Some(b"active")),
-            (b"user:1".as_slice(), &KVWriteValue::Some(b"john_doe")),
-            (b"user:2".as_slice(), &KVWriteValue::Some(b"jane_smith")),
+            (b"config:retries".as_slice(), KVValue::Some(b"3".into())),
+            (b"config:timeout".as_slice(), KVValue::Some(b"30".into())),
+            (b"deleted_user:old".as_slice(), KVValue::Deleted),
+            (
+                b"session:abc123".as_slice(),
+                KVValue::Some(b"active".into()),
+            ),
+            (b"user:1".as_slice(), KVValue::Some(b"john_doe".into())),
+            (b"user:2".as_slice(), KVValue::Some(b"jane_smith".into())),
         ];
 
         // 97 + 12 + 12 = 121
 
         for (key, value) in test_data {
-            match builder.add(key, value) {
+            match builder.add(key, &value) {
                 Ok(()) => total_entries += 1,
                 Err(BlockBuilderError::BlockFull) => break,
                 Err(e) => panic!("Unexpected error: {:?}", e),
@@ -632,7 +634,7 @@ mod tests {
         // Test single entry block
         let mut single_builder = BlockBuilder::new();
         single_builder
-            .add(b"key", &KVWriteValue::Some(b"value"))
+            .add(b"key", &KVValue::Some(b"value".into()))
             .unwrap();
         let single_block = single_builder.build();
         let single_encoded = single_block.encode();
@@ -648,7 +650,7 @@ mod tests {
             let key = format!("key{:03}", i);
             let value = format!("value{:03}", i);
             multi_builder
-                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVValue::Some(value.as_bytes().to_vec()))
                 .unwrap();
         }
         let multi_block = multi_builder.build();
@@ -664,13 +666,11 @@ mod tests {
         // Test with deleted entries
         let mut deleted_builder = BlockBuilder::new();
         deleted_builder
-            .add(b"a_live", &KVWriteValue::Some(b"data"))
+            .add(b"a_live", &KVValue::Some(b"data".into()))
             .unwrap();
+        deleted_builder.add(b"b_dead", &KVValue::Deleted).unwrap();
         deleted_builder
-            .add(b"b_dead", &KVWriteValue::Deleted)
-            .unwrap();
-        deleted_builder
-            .add(b"c_also_live", &KVWriteValue::Some(b"more_data"))
+            .add(b"c_also_live", &KVValue::Some(b"more_data".into()))
             .unwrap();
         let deleted_block = deleted_builder.build();
         let deleted_encoded = deleted_block.encode();
@@ -700,7 +700,7 @@ mod tests {
         // Create a block with one entry and test round-trip
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"test_key", &KVWriteValue::Some(b"test_value"))
+            .add(b"test_key", &KVValue::Some(b"test_value".into()))
             .unwrap();
         let original_block = builder.build();
         let encoded = original_block.encode();
@@ -721,13 +721,13 @@ mod tests {
         // Create a block with multiple entries and test round-trip
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"key1", &KVWriteValue::Some(b"value1"))
+            .add(b"key1", &KVValue::Some(b"value1".into()))
             .unwrap();
         builder
-            .add(b"key2", &KVWriteValue::Some(b"value2"))
+            .add(b"key2", &KVValue::Some(b"value2".into()))
             .unwrap();
         builder
-            .add(b"key3", &KVWriteValue::Some(b"value3"))
+            .add(b"key3", &KVValue::Some(b"value3".into()))
             .unwrap();
         let original_block = builder.build();
         let encoded = original_block.encode();
@@ -750,11 +750,11 @@ mod tests {
         // Create a block with both live and deleted entries
         let mut builder = BlockBuilder::new();
         builder
-            .add(b"a_key", &KVWriteValue::Some(b"live_value"))
+            .add(b"a_key", &KVValue::Some(b"live_value".into()))
             .unwrap();
-        builder.add(b"b_key", &KVWriteValue::Deleted).unwrap();
+        builder.add(b"b_key", &KVValue::Deleted).unwrap();
         builder
-            .add(b"c_key", &KVWriteValue::Some(b"another_value"))
+            .add(b"c_key", &KVValue::Some(b"another_value".into()))
             .unwrap();
         let original_block = builder.build();
         let encoded = original_block.encode();
@@ -776,7 +776,7 @@ mod tests {
         let large_key = vec![b'k'; 1000];
         let large_value = vec![b'v'; 2000];
         builder
-            .add(&large_key, &KVWriteValue::Some(&large_value))
+            .add(&large_key, &KVValue::Some(large_value))
             .unwrap();
 
         let original_block = builder.build();
@@ -803,7 +803,7 @@ mod tests {
             let key = format!("k{:03}", i);
             let value = format!("v{:03}", i);
             builder
-                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVValue::Some(value.as_bytes().to_vec()))
                 .unwrap();
         }
 
@@ -826,22 +826,22 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         // Small entry
-        builder.add(b"a", &KVWriteValue::Some(b"1")).unwrap();
+        builder.add(b"a", &KVValue::Some(b"1".into())).unwrap();
 
         // Medium entry
         builder
-            .add(b"bbbbbbbbbb", &KVWriteValue::Some(b"medium_value_data"))
+            .add(b"bbbbbbbbbb", &KVValue::Some(b"medium_value_data".into()))
             .unwrap();
 
         // Large entry
         let large_key = vec![b'c'; 500];
         let large_value = vec![b'V'; 800];
         builder
-            .add(&large_key, &KVWriteValue::Some(&large_value))
+            .add(&large_key, &KVValue::Some(large_value))
             .unwrap();
 
         // Deleted entry
-        builder.add(b"deleted", &KVWriteValue::Deleted).unwrap();
+        builder.add(b"deleted", &KVValue::Deleted).unwrap();
 
         let original_block = builder.build();
         let encoded = original_block.encode();
@@ -895,16 +895,16 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         let test_cases = vec![
-            (b"ashort".as_slice(), &KVWriteValue::Some(b"s")),
+            (b"ashort".as_slice(), KVValue::Some(b"s".into())),
             (
                 b"blonger_key_name".as_slice(),
-                &KVWriteValue::Some(b"longer_value_data_here"),
+                KVValue::Some(b"longer_value_data_here".into()),
             ),
-            (b"cdeleted_entry".as_slice(), &KVWriteValue::Deleted),
+            (b"cdeleted_entry".as_slice(), KVValue::Deleted),
         ];
 
         for (key, value) in test_cases {
-            builder.add(key, value).unwrap();
+            builder.add(key, &value).unwrap();
         }
 
         let original_block = builder.build();
@@ -967,7 +967,7 @@ mod tests {
             let value = format!("v{:03}", i);
 
             match builder
-                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVValue::Some(value.as_bytes().to_vec()))
             {
                 Ok(()) => entries_added += 1,
                 Err(BlockBuilderError::BlockFull) => break,
@@ -994,12 +994,12 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         // Add entries of different sizes to create different offsets
-        builder.add(b"a", &KVWriteValue::Some(b"short")).unwrap(); // offset 0
+        builder.add(b"a", &KVValue::Some(b"short".into())).unwrap(); // offset 0
         builder
-            .add(b"bb", &KVWriteValue::Some(b"medium_len"))
+            .add(b"bb", &KVValue::Some(b"medium_len".into()))
             .unwrap(); // offset 10
         builder
-            .add(b"ccc", &KVWriteValue::Some(b"longer_value_here"))
+            .add(b"ccc", &KVValue::Some(b"longer_value_here".into()))
             .unwrap(); // offset 26
 
         let original_block = builder.build();
@@ -1017,24 +1017,25 @@ mod tests {
         let mut builder = BlockBuilder::new();
 
         // Add first key
-        let result1 = builder.add(b"zebra", &KVWriteValue::Some(b"last"));
+        let result1 = builder.add(b"zebra", &KVValue::Some(b"last".into()));
         assert!(result1.is_ok());
 
         // Try to add a key that comes before "zebra" lexicographically
-        let result2 = builder.add(b"apple", &KVWriteValue::Some(b"first"));
+        let result2 = builder.add(b"apple", &KVValue::Some(b"first".into()));
         assert!(matches!(result2, Err(BlockBuilderError::KeyOutOfOrder)));
 
         // Try to add another out-of-order key
-        let result3 = builder.add(b"banana", &KVWriteValue::Some(b"middle"));
+        let result3 = builder.add(b"banana", &KVValue::Some(b"middle".into()));
         assert!(matches!(result3, Err(BlockBuilderError::KeyOutOfOrder)));
 
         // Adding a key equal to the last one should also fail
-        let result4 = builder.add(b"zebra", &KVWriteValue::Some(b"duplicate"));
+        let result4 =
+            builder.add(b"zebra", &KVValue::Some(b"duplicate".into()));
         assert!(matches!(result4, Err(BlockBuilderError::KeyDuplicate)));
 
         // Adding a key that comes after should succeed
         let result5 =
-            builder.add(b"zebra_stripe", &KVWriteValue::Some(b"after"));
+            builder.add(b"zebra_stripe", &KVValue::Some(b"after".into()));
         assert!(result5.is_ok());
 
         // Verify the block only contains the valid entries
@@ -1044,15 +1045,15 @@ mod tests {
 
     #[test]
     fn test_block_builder_cannot_add_duplicate_keys() {
-        let v = || &KVWriteValue::Some(b"v");
+        let v = KVValue::Some(b"v".into());
         let mut builder = BlockBuilder::new();
-        let mut r = builder.add(b"foo", v());
+        let mut r = builder.add(b"foo", &v);
         assert!(r.is_ok());
-        r = builder.add(b"foo", v());
+        r = builder.add(b"foo", &v);
         assert!(matches!(r, Err(BlockBuilderError::KeyDuplicate)));
-        r = builder.add(b"bar", v());
+        r = builder.add(b"bar", &v);
         assert!(matches!(r, Err(BlockBuilderError::KeyOutOfOrder)));
-        r = builder.add(b"zebra", v());
+        r = builder.add(b"zebra", &v);
         assert!(r.is_ok());
     }
 
@@ -1065,7 +1066,7 @@ mod tests {
             vec![b"apple", b"banana", b"cherry", b"date", b"elderberry"];
 
         for key in &keys {
-            let result = builder.add(*key, &KVWriteValue::Some(b"v"));
+            let result = builder.add(*key, &KVValue::Some(b"v".into()));
             assert!(
                 result.is_ok(),
                 "Failed to add key: {:?}",
@@ -1083,17 +1084,17 @@ mod tests {
 
         // Test that prefix relationships work correctly
         builder
-            .add(b"prefix", &KVWriteValue::Some(b"base"))
+            .add(b"prefix", &KVValue::Some(b"base".into()))
             .unwrap();
 
         // "prefix" < "prefix_extended" should work
         let result =
-            builder.add(b"prefix_extended", &KVWriteValue::Some(b"extended"));
+            builder.add(b"prefix_extended", &KVValue::Some(b"extended".into()));
         assert!(result.is_ok());
 
         // But "prefix" == "prefix" should fail
         let result_equal =
-            builder.add(b"prefix", &KVWriteValue::Some(b"duplicate"));
+            builder.add(b"prefix", &KVValue::Some(b"duplicate".into()));
         assert!(matches!(
             result_equal,
             Err(BlockBuilderError::KeyOutOfOrder)
@@ -1106,15 +1107,15 @@ mod tests {
 
         // Add lowercase key
         builder
-            .add(b"apple", &KVWriteValue::Some(b"fruit"))
+            .add(b"apple", &KVValue::Some(b"fruit".into()))
             .unwrap();
 
         // Uppercase 'A' comes before lowercase 'a' in ASCII
-        let result = builder.add(b"Apple", &KVWriteValue::Some(b"fruit2"));
+        let result = builder.add(b"Apple", &KVValue::Some(b"fruit2".into()));
         assert!(matches!(result, Err(BlockBuilderError::KeyOutOfOrder)));
 
         // But lowercase 'b' comes after lowercase 'a'
-        let result2 = builder.add(b"banana", &KVWriteValue::Some(b"fruit3"));
+        let result2 = builder.add(b"banana", &KVValue::Some(b"fruit3".into()));
         assert!(result2.is_ok());
     }
 }
