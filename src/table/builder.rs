@@ -15,7 +15,7 @@ use siphasher::sip::SipHasher13;
 
 use crate::{
     block::{BlockBuilder, BlockBuilderError},
-    kvrecord::KVWriteValue,
+    kvrecord::KVValue,
 };
 
 use super::BlockMeta;
@@ -61,7 +61,7 @@ impl TableBuilder {
     pub(super) fn add(
         &mut self,
         key: &[u8],
-        value: &KVWriteValue,
+        value: &KVValue,
     ) -> Result<(), BlockBuilderError> {
         let mut r = self.bb.add(key, value);
 

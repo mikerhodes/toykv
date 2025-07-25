@@ -6,7 +6,6 @@
 // | data block | ... |          metadata         | meta block offset (u32) |
 // --------------------------------------------------------------------------
 
-use crossbeam_skiplist::SkipMap;
 use std::{
     io::{Cursor, Error, Read},
     iter::repeat_with,
@@ -17,6 +16,7 @@ use std::{
 const BLOOM_HASH_KEY: &[u8; 16] =
     &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
+use crate::memtable::MemtableIterator;
 use builder::TableBuilder;
 use iterator::{TableIterator, TableReader};
 use siphasher::sip::SipHasher13;
@@ -61,13 +61,15 @@ impl SSTables {
     /// by future calls to `get`.
     pub(crate) fn write_new_sstable(
         &self,
-        memtable: &SkipMap<Vec<u8>, KVValue>,
+        memtable_iterator: MemtableIterator,
     ) -> Result<PathBuf, Error> {
         let fname = next_sstable_fname(self.d.as_path());
 
-        let mut sst = TableBuilder::new(self.bloom_hasher, memtable.len());
-        for entry in memtable {
-            assert!(sst.add(entry.key(), &entry.value().into()).is_ok());
+        let mut sst =
+            TableBuilder::new(self.bloom_hasher, memtable_iterator.len());
+        for entry in memtable_iterator {
+            let record = entry?;
+            assert!(sst.add(&record.key[..], &record.value).is_ok());
         }
         sst.write(fname.as_path())?;
 
@@ -248,7 +250,7 @@ mod tests {
     use iterator::TableIterator;
 
     use super::*;
-    use crate::kvrecord::{KVRecord, KVValue, KVWriteValue};
+    use crate::kvrecord::{KVRecord, KVValue};
 
     // TableBuilder Tests
     #[test]
@@ -261,8 +263,8 @@ mod tests {
     fn test_table_builder_add_single_entry() {
         // Test that adding a single entry doesn't crash
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1);
-        let result =
-            table_builder.add(b"test_key", &KVWriteValue::Some(b"test_value"));
+        let result = table_builder
+            .add(b"test_key", &KVValue::Some(b"test_value".into()));
         assert!(result.is_ok());
     }
 
@@ -272,14 +274,14 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 3);
 
         let result1 =
-            table_builder.add(b"key1", &KVWriteValue::Some(b"value1"));
+            table_builder.add(b"key1", &KVValue::Some(b"value1".into()));
         assert!(result1.is_ok());
 
         let result2 =
-            table_builder.add(b"key2", &KVWriteValue::Some(b"value2"));
+            table_builder.add(b"key2", &KVValue::Some(b"value2".into()));
         assert!(result2.is_ok());
 
-        let result3 = table_builder.add(b"key3", &KVWriteValue::Deleted);
+        let result3 = table_builder.add(b"key3", &KVValue::Deleted);
         assert!(result3.is_ok());
     }
 
@@ -290,9 +292,9 @@ mod tests {
 
         for i in 0..1000 {
             let key = format!("key{:04}", i);
-            let value = [b'L'; 500];
+            let value = [b'L'; 500].to_vec();
             let result =
-                table_builder.add(key.as_bytes(), &KVWriteValue::Some(&value));
+                table_builder.add(key.as_bytes(), &KVValue::Some(value).into());
             assert!(result.is_ok());
         }
         let temp_file =
@@ -312,8 +314,8 @@ mod tests {
         let _size = table_builder.estimate_size();
 
         // Should work after adding entries
-        let _ =
-            table_builder.add(b"test_key", &KVWriteValue::Some(b"test_value"));
+        let _ = table_builder
+            .add(b"test_key", &KVValue::Some(b"test_value".into()));
         let _size = table_builder.estimate_size();
     }
 
@@ -323,9 +325,9 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Add some test data
-        let _ = table_builder.add(b"key1", &KVWriteValue::Some(b"value1"));
-        let _ = table_builder.add(b"key2", &KVWriteValue::Some(b"value2"));
-        let _ = table_builder.add(b"key3", &KVWriteValue::Deleted);
+        let _ = table_builder.add(b"key1", &KVValue::Some(b"value1".into()));
+        let _ = table_builder.add(b"key2", &KVValue::Some(b"value2".into()));
+        let _ = table_builder.add(b"key3", &KVValue::Deleted);
 
         // Create a temporary file
         let temp_file =
@@ -342,7 +344,7 @@ mod tests {
         // Test round-trip with a single entry
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
         table_builder
-            .add(b"hello", &KVWriteValue::Some(b"world"))
+            .add(b"hello", &KVValue::Some(b"world".into()))
             .unwrap();
 
         let temp_file =
@@ -370,10 +372,13 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         let test_data = vec![
-            (b"apple".as_slice(), KVWriteValue::Some(b"red fruit")),
-            (b"banana".as_slice(), KVWriteValue::Some(b"yellow fruit")),
-            (b"cherry".as_slice(), KVWriteValue::Some(b"small red fruit")),
-            (b"date".as_slice(), KVWriteValue::Some(b"brown fruit")),
+            (b"apple".as_slice(), KVValue::Some(b"red fruit".into())),
+            (b"banana".as_slice(), KVValue::Some(b"yellow fruit".into())),
+            (
+                b"cherry".as_slice(),
+                KVValue::Some(b"small red fruit".into()),
+            ),
+            (b"date".as_slice(), KVValue::Some(b"brown fruit".into())),
         ];
 
         for (key, value) in &test_data {
@@ -417,19 +422,15 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"a_alive1", &KVWriteValue::Some(b"data1"))
+            .add(b"a_alive1", &KVValue::Some(b"data1".into()))
             .unwrap();
+        table_builder.add(b"b_deleted1", &KVValue::Deleted).unwrap();
         table_builder
-            .add(b"b_deleted1", &KVWriteValue::Deleted)
+            .add(b"c_alive2", &KVValue::Some(b"data2".into()))
             .unwrap();
+        table_builder.add(b"d_deleted2", &KVValue::Deleted).unwrap();
         table_builder
-            .add(b"c_alive2", &KVWriteValue::Some(b"data2"))
-            .unwrap();
-        table_builder
-            .add(b"d_deleted2", &KVWriteValue::Deleted)
-            .unwrap();
-        table_builder
-            .add(b"e_alive3", &KVWriteValue::Some(b"data3"))
+            .add(b"e_alive3", &KVValue::Some(b"data3".into()))
             .unwrap();
 
         let temp_file =
@@ -473,9 +474,9 @@ mod tests {
         // Create entries large enough to force multiple blocks
         for i in 0..entries {
             let key = format!("large_key_{:06}", i);
-            let value = vec![b'X'; 1000]; // 1KB value
+            let value = vec![b'X'; 1000].to_vec(); // 1KB value
             table_builder
-                .add(key.as_bytes(), &KVWriteValue::Some(&value))
+                .add(key.as_bytes(), &KVValue::Some(value).into())
                 .unwrap();
         }
 
@@ -523,7 +524,7 @@ mod tests {
             let key = format!("key{:06}", i);
             let value = format!("value{:06}", i);
             table_builder
-                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVValue::Some(value.as_bytes().into()))
                 .unwrap();
         }
 
@@ -560,28 +561,30 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Small entry
-        table_builder.add(b"a", &KVWriteValue::Some(b"1")).unwrap();
+        table_builder
+            .add(b"a", &KVValue::Some(b"1".into()))
+            .unwrap();
 
         // Medium entry
         table_builder
-            .add(b"b_medium_key", &KVWriteValue::Some(b"medium_value_data"))
+            .add(b"b_medium_key", &KVValue::Some(b"medium_value_data".into()))
             .unwrap();
 
         // Large entry
         let large_key = vec![b'c'; 100];
         let large_value = vec![b'V'; 500];
         table_builder
-            .add(&large_key, &KVWriteValue::Some(&large_value))
+            .add(&large_key, &KVValue::Some(large_value.to_vec()).into())
             .unwrap();
 
         // Deleted entry
         table_builder
-            .add(b"deleted_entry", &KVWriteValue::Deleted)
+            .add(b"deleted_entry", &KVValue::Deleted)
             .unwrap();
 
         // Another small entry
         table_builder
-            .add(b"z_final", &KVWriteValue::Some(b"last"))
+            .add(b"z_final", &KVValue::Some(b"last".into()))
             .unwrap();
 
         let temp_file =
@@ -639,19 +642,19 @@ mod tests {
 
         // Keys and values with null bytes
         table_builder
-            .add(b"key\x00with_null", &KVWriteValue::Some(b"value\x00null"))
+            .add(b"key\x00with_null", &KVValue::Some(b"value\x00null".into()))
             .unwrap();
 
         // Keys and values with high bytes
         table_builder
-            .add(b"key\xff\xfe", &KVWriteValue::Some(b"value\xff\xfe\xfd"))
+            .add(b"key\xff\xfe", &KVValue::Some(b"value\xff\xfe\xfd".into()))
             .unwrap();
 
         // Mixed special characters
         table_builder
             .add(
                 b"mixed\x01\x80\xff",
-                &KVWriteValue::Some(b"data\x00\x7f\x80\xff"),
+                &KVValue::Some(b"data\x00\x7f\x80\xff".into()),
             )
             .unwrap();
 
@@ -695,7 +698,7 @@ mod tests {
             let key = format!("item{:02}", i);
             let value = format!("data{:02}", i);
             table_builder
-                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVValue::Some(value.as_bytes().into()))
                 .unwrap();
         }
 
@@ -739,12 +742,12 @@ mod tests {
         let max_value = vec![b'V'; 2000];
 
         table_builder
-            .add(&max_key, &KVWriteValue::Some(&max_value))
+            .add(&max_key, &KVValue::Some(max_value.to_vec()).into())
             .unwrap();
 
         // Add a normal entry after
         table_builder
-            .add(b"normal", &KVWriteValue::Some(b"entry"))
+            .add(b"normal", &KVValue::Some(b"entry".into()))
             .unwrap();
 
         let temp_file =
@@ -777,19 +780,19 @@ mod tests {
 
         // Using alphabetical prefixes to ensure proper ordering
         table_builder
-            .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
+            .add(b"a_apple", &KVValue::Some(b"red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"b_banana", &KVWriteValue::Some(b"yellow fruit"))
+            .add(b"b_banana", &KVValue::Some(b"yellow fruit".into()))
             .unwrap();
         table_builder
-            .add(b"c_cherry", &KVWriteValue::Some(b"small red fruit"))
+            .add(b"c_cherry", &KVValue::Some(b"small red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"d_date", &KVWriteValue::Some(b"brown fruit"))
+            .add(b"d_date", &KVValue::Some(b"brown fruit".into()))
             .unwrap();
         table_builder
-            .add(b"e_elderberry", &KVWriteValue::Some(b"purple fruit"))
+            .add(b"e_elderberry", &KVValue::Some(b"purple fruit".into()))
             .unwrap();
 
         let temp_file =
@@ -832,16 +835,16 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
+            .add(b"a_apple", &KVValue::Some(b"red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"c_cherry", &KVWriteValue::Some(b"small red fruit"))
+            .add(b"c_cherry", &KVValue::Some(b"small red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"e_elderberry", &KVWriteValue::Some(b"purple fruit"))
+            .add(b"e_elderberry", &KVValue::Some(b"purple fruit".into()))
             .unwrap();
         table_builder
-            .add(b"g_grape", &KVWriteValue::Some(b"green fruit"))
+            .add(b"g_grape", &KVValue::Some(b"green fruit".into()))
             .unwrap();
 
         let temp_file =
@@ -876,13 +879,13 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"b_banana", &KVWriteValue::Some(b"yellow fruit"))
+            .add(b"b_banana", &KVValue::Some(b"yellow fruit".into()))
             .unwrap();
         table_builder
-            .add(b"c_cherry", &KVWriteValue::Some(b"small red fruit"))
+            .add(b"c_cherry", &KVValue::Some(b"small red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"d_date", &KVWriteValue::Some(b"brown fruit"))
+            .add(b"d_date", &KVValue::Some(b"brown fruit".into()))
             .unwrap();
 
         let temp_file =
@@ -909,13 +912,13 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
+            .add(b"a_apple", &KVValue::Some(b"red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"b_banana", &KVWriteValue::Some(b"yellow fruit"))
+            .add(b"b_banana", &KVValue::Some(b"yellow fruit".into()))
             .unwrap();
         table_builder
-            .add(b"c_cherry", &KVWriteValue::Some(b"small red fruit"))
+            .add(b"c_cherry", &KVValue::Some(b"small red fruit".into()))
             .unwrap();
 
         let temp_file =
@@ -940,13 +943,13 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
+            .add(b"a_apple", &KVValue::Some(b"red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"b_banana", &KVWriteValue::Some(b"yellow fruit"))
+            .add(b"b_banana", &KVValue::Some(b"yellow fruit".into()))
             .unwrap();
         table_builder
-            .add(b"c_cherry", &KVWriteValue::Some(b"small red fruit"))
+            .add(b"c_cherry", &KVValue::Some(b"small red fruit".into()))
             .unwrap();
 
         let temp_file =
@@ -976,13 +979,13 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
+            .add(b"a_apple", &KVValue::Some(b"red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"b_banana", &KVWriteValue::Some(b"yellow fruit"))
+            .add(b"b_banana", &KVValue::Some(b"yellow fruit".into()))
             .unwrap();
         table_builder
-            .add(b"c_cherry", &KVWriteValue::Some(b"small red fruit"))
+            .add(b"c_cherry", &KVValue::Some(b"small red fruit".into()))
             .unwrap();
 
         let temp_file =
@@ -1014,19 +1017,15 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
+            .add(b"a_apple", &KVValue::Some(b"red fruit".into()))
             .unwrap();
+        table_builder.add(b"b_banana", &KVValue::Deleted).unwrap();
         table_builder
-            .add(b"b_banana", &KVWriteValue::Deleted)
+            .add(b"c_cherry", &KVValue::Some(b"small red fruit".into()))
             .unwrap();
+        table_builder.add(b"d_date", &KVValue::Deleted).unwrap();
         table_builder
-            .add(b"c_cherry", &KVWriteValue::Some(b"small red fruit"))
-            .unwrap();
-        table_builder
-            .add(b"d_date", &KVWriteValue::Deleted)
-            .unwrap();
-        table_builder
-            .add(b"e_elderberry", &KVWriteValue::Some(b"purple fruit"))
+            .add(b"e_elderberry", &KVValue::Some(b"purple fruit".into()))
             .unwrap();
 
         let temp_file =
@@ -1060,19 +1059,19 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
+            .add(b"a_apple", &KVValue::Some(b"red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"b_banana", &KVWriteValue::Some(b"yellow fruit"))
+            .add(b"b_banana", &KVValue::Some(b"yellow fruit".into()))
             .unwrap();
         table_builder
-            .add(b"c_cherry", &KVWriteValue::Some(b"small red fruit"))
+            .add(b"c_cherry", &KVValue::Some(b"small red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"d_date", &KVWriteValue::Some(b"brown fruit"))
+            .add(b"d_date", &KVValue::Some(b"brown fruit".into()))
             .unwrap();
         table_builder
-            .add(b"e_elderberry", &KVWriteValue::Some(b"purple fruit"))
+            .add(b"e_elderberry", &KVValue::Some(b"purple fruit".into()))
             .unwrap();
 
         let temp_file =
@@ -1115,7 +1114,7 @@ mod tests {
             let key = format!("key{:06}", i);
             let value = format!("value{:06}", i);
             table_builder
-                .add(key.as_bytes(), &KVWriteValue::Some(value.as_bytes()))
+                .add(key.as_bytes(), &KVValue::Some(value.as_bytes().into()))
                 .unwrap();
         }
 
@@ -1150,10 +1149,10 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         table_builder
-            .add(b"a_apple", &KVWriteValue::Some(b"red fruit"))
+            .add(b"a_apple", &KVValue::Some(b"red fruit".into()))
             .unwrap();
         table_builder
-            .add(b"b_banana", &KVWriteValue::Some(b"yellow fruit"))
+            .add(b"b_banana", &KVValue::Some(b"yellow fruit".into()))
             .unwrap();
 
         let temp_file =

@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    kvrecord::{KVRecord, KVValue, KVWriteRecord, KVWriteValue},
+    kvrecord::{KVRecord, KVValue, KVWriteRecord},
     ToyKVError, WALSync,
 };
 
@@ -137,7 +137,7 @@ impl WAL {
     pub(crate) fn write(
         &mut self,
         key: &[u8],
-        value: KVWriteValue,
+        value: &KVValue,
     ) -> Result<(), ToyKVError> {
         if self.f.is_none() {
             return Err(ToyKVError::BadWALState);
@@ -244,7 +244,7 @@ impl WALRecord {
         w: &mut T,
         seq: u32,
         key: &[u8],
-        value: KVWriteValue,
+        value: &KVValue,
     ) -> Result<(), Error> {
         // Create our record and attempt to write
         // it out in one go.
