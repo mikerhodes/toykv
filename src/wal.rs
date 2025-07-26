@@ -161,36 +161,16 @@ impl WAL {
         Ok(())
     }
 
-    /// Resets the WAL by deleting the old file and dropping any
-    /// in memory state. It's designed to be used when the memtable
-    /// this WAL is associated with has been flushed to disk and
-    /// we need to start the WAL again.
-    ///
-    /// After this, the WAL cannot be recovered
-    /// without filesystem level investigation.
-    #[allow(dead_code)]
-    pub(crate) fn reset(&mut self) -> Result<(), ToyKVError> {
+    /// Delete the WAL file from disk.
+    /// Take care; this could result in data loss if the
+    /// associated memtable is not written to an sstable.
+    pub(crate) fn delete(&mut self) -> Result<(), ToyKVError> {
         if self.f.is_none() {
             return Err(ToyKVError::BadWALState);
         }
-
-        let file = self.f.as_mut().unwrap();
-        file.sync_all()?;
-
         // Drop our writer so it closes
         self.f = None;
-
-        // Delete the current WAL file
         fs::remove_file(self.wal_path.as_path())?;
-
-        // Reopen the WAL, in write rather than append as it is new
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(self.wal_path.as_path())?;
-        self.f = Some(file);
-        self.nextseq = 0;
-        self.wal_writes = 0;
         Ok(())
     }
 }

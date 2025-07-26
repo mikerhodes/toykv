@@ -30,18 +30,20 @@ impl Memtable {
         k: Vec<u8>,
         v: KVValue,
     ) -> Result<(), ToyKVError> {
-        self.wal.write(&k, (&v).into())?;
+        self.wal.write(&k, &v)?;
         self.memtable.insert(k, v);
         Ok(())
     }
 
+    /// The number of writes to the current WAL file.
     pub(crate) fn wal_writes(&self) -> u64 {
         self.wal.wal_writes
     }
 
-    pub(crate) fn clear(&mut self) -> Result<(), ToyKVError> {
-        self.wal.reset()?;
-        self.memtable.clear();
+    /// Remove the ondisk WAL for this memtable. Use after
+    /// writing the memtable to an sstable.
+    pub(crate) fn cleanup_disk(&mut self) -> Result<(), ToyKVError> {
+        self.wal.delete()?;
         Ok(())
     }
 
@@ -53,10 +55,12 @@ impl Memtable {
         }
     }
 
+    /// Retrieve a MemtableIterator over all entries in the memtable.
     pub(crate) fn iter(&self) -> MemtableIterator {
         self.range(Bound::Unbounded, Bound::Unbounded)
     }
 
+    /// Retrieve a MemtableIterator over the given bounds.
     pub(crate) fn range(
         &self,
         lower_bound: Bound<Vec<u8>>,

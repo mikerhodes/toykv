@@ -1,6 +1,7 @@
 use memtable::Memtable;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::{io::Error, ops::Bound, path::Path};
 
 use error::ToyKVError;
@@ -17,7 +18,7 @@ mod merge_iterator;
 mod table;
 mod wal;
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum WALSync {
     Full,
     Off,
@@ -33,8 +34,10 @@ pub struct ToyKVMetrics {
 
 pub struct ToyKV {
     /// d is the folder that the KV store owns.
+    d: PathBuf,
     pub metrics: ToyKVMetrics,
     wal_write_threshold: u64,
+    wal_sync: WALSync,
     state: RwLock<ToyKVState>,
 }
 
@@ -95,9 +98,11 @@ impl ToyKVBuilder {
         let memtable = Memtable::new(d, self.options.wal_sync)?;
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
+            d: d.to_path_buf(),
             state: RwLock::new(ToyKVState { memtable, sstables }),
             metrics: Default::default(),
             wal_write_threshold: self.options.wal_write_threshold,
+            wal_sync: self.options.wal_sync,
         })
     }
 }
@@ -153,14 +158,23 @@ impl ToyKV {
 
     /// Internal method to write a KVValue to WAL and memtable
     fn write(&self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
+        // Maintain a lock on the database during writing
         let mut state = self.state.write().unwrap();
 
         state.memtable.write(k, v)?;
         if state.memtable.wal_writes() >= self.wal_write_threshold {
+            // This needs to happen in this order to maintain
+            // our ability to reload the state from disk if
+            // we crash. Probably it should be encapsulated,
+            // but it's a bit hard right now due to it all
+            // being bound to the state variable. Maybe once
+            // we create a new sstables each time we update them.
             let memtable = state.memtable.iter();
             let fname = state.sstables.write_new_sstable(memtable)?;
             state.sstables.commit_new_sstable(fname)?;
-            state.memtable.clear()?;
+            state.memtable.cleanup_disk()?;
+
+            state.memtable = Memtable::new(&self.d, self.wal_sync)?;
             self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
