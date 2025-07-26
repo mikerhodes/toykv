@@ -1,8 +1,10 @@
 use memtable::Memtable;
+use std::iter::repeat_with;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::{io::Error, ops::Bound, path::Path};
+use walindex::WALIndex;
 
 use error::ToyKVError;
 use kvrecord::KVValue;
@@ -18,6 +20,7 @@ mod merge_iterator;
 mod merge_iterator2;
 mod table;
 mod wal;
+mod walindex;
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum WALSync {
@@ -44,6 +47,7 @@ pub struct ToyKV {
 
 /// ToyKVState is the modifiable state of the database.
 struct ToyKVState {
+    wal_index: WALIndex,
     memtable: Memtable,
     sstables: SSTables,
 }
@@ -96,16 +100,36 @@ impl ToyKVBuilder {
             return Err(ToyKVError::DataDirMissing);
         }
 
-        let memtable = Memtable::new(d, self.options.wal_sync)?;
+        // If a WAL index file exists and contains an
+        // active_wal path, load that, otherwise
+        // create a new memtable.
+        let wal_index_path = d.join("wal_index.json");
+        let mut wal_index = WALIndex::open(wal_index_path)?;
+        let wal_path = match wal_index.active_wal() {
+            None => new_wal_path(d),
+            Some(x) => x,
+        };
+        wal_index.set_active_wal(&wal_path)?;
+
+        let memtable = Memtable::new(wal_path, self.options.wal_sync)?;
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
             d: d.to_path_buf(),
-            state: RwLock::new(ToyKVState { memtable, sstables }),
+            state: RwLock::new(ToyKVState {
+                wal_index,
+                memtable,
+                sstables,
+            }),
             metrics: Default::default(),
             wal_write_threshold: self.options.wal_write_threshold,
             wal_sync: self.options.wal_sync,
         })
     }
+}
+
+fn new_wal_path(dir: &Path) -> PathBuf {
+    let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
+    dir.join(format!("{}.wal", s))
 }
 
 /// Open a database using default settings.
@@ -175,7 +199,9 @@ impl ToyKV {
             state.sstables.commit_new_sstable(fname)?;
             state.memtable.cleanup_disk()?;
 
-            state.memtable = Memtable::new(&self.d, self.wal_sync)?;
+            let wal_path = new_wal_path(&self.d);
+            state.wal_index.set_active_wal(&wal_path)?;
+            state.memtable = Memtable::new(wal_path, self.wal_sync)?;
             self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
