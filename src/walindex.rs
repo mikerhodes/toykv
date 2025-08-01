@@ -8,6 +8,7 @@ use std::{
 #[derive(Serialize, Deserialize)]
 pub(crate) struct WALIndexFile {
     pub(crate) active_wal: Option<PathBuf>,
+    pub(crate) frozen_wal: Option<PathBuf>,
 }
 
 pub(crate) struct WALIndex {
@@ -28,7 +29,10 @@ impl WALIndex {
                 })
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                let wif = WALIndexFile { active_wal: None };
+                let wif = WALIndexFile {
+                    active_wal: None,
+                    frozen_wal: None,
+                };
                 Ok(WALIndex {
                     wal_index_file: wif,
                     backing_file_path: p,
@@ -49,6 +53,21 @@ impl WALIndex {
 
     pub(crate) fn active_wal(&self) -> Option<PathBuf> {
         match &self.wal_index_file.active_wal {
+            None => None,
+            Some(x) => Some(x.clone()),
+        }
+    }
+    /// Set active WAL and write the index file
+    pub(crate) fn set_frozen_wal(&mut self, p: &Path) -> Result<(), Error> {
+        self.wal_index_file.frozen_wal = Some(p.to_path_buf());
+        fs::write(
+            &self.backing_file_path,
+            serde_json::to_string(&self.wal_index_file)?,
+        )
+    }
+
+    pub(crate) fn frozen_wal(&self) -> Option<PathBuf> {
+        match &self.wal_index_file.frozen_wal {
             None => None,
             Some(x) => Some(x.clone()),
         }

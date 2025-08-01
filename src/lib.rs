@@ -48,7 +48,17 @@ pub struct ToyKV {
 /// ToyKVState is the modifiable state of the database.
 struct ToyKVState {
     wal_index: WALIndex,
-    memtable: Memtable,
+
+    /// active_memtable stores new writes before they
+    /// are moved to sstables. They have a WAL for
+    /// durability.
+    active_memtable: Memtable,
+    /// frozen_memtable exists to be written to disk
+    /// in the background, such that we can still
+    /// accept writes to the active memtable.
+    frozen_memtable: Option<Memtable>,
+    /// sstables are the on-disk primary database
+    /// storage.
     sstables: SSTables,
 }
 
@@ -100,24 +110,37 @@ impl ToyKVBuilder {
             return Err(ToyKVError::DataDirMissing);
         }
 
-        // If a WAL index file exists and contains an
-        // active_wal path, load that, otherwise
-        // create a new memtable.
         let wal_index_path = d.join("wal_index.json");
         let mut wal_index = WALIndex::open(wal_index_path)?;
-        let wal_path = match wal_index.active_wal() {
+
+        // If there is a WAL on disk, load the active memtable
+        // from it, otherwise initialise a memtable with a fresh
+        // WAL file on disk.
+        let active_wal_path = match wal_index.active_wal() {
             None => new_wal_path(d),
             Some(x) => x,
         };
-        wal_index.set_active_wal(&wal_path)?;
+        wal_index.set_active_wal(&active_wal_path)?;
+        let active_memtable =
+            Memtable::new(active_wal_path, self.options.wal_sync)?;
 
-        let memtable = Memtable::new(wal_path, self.options.wal_sync)?;
+        // Unlike active memtable, we don't need to have a frozen
+        // memtable unless we exited running before we managed
+        // to save the frozen memtable to disk. Mostly the
+        // frozen memtable is transient, as it's saved to disk
+        // almost immediately.
+        let frozen_memtable = match wal_index.frozen_wal() {
+            None => None,
+            Some(x) => Some(Memtable::new(x, self.options.wal_sync)?),
+        };
+
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
             d: d.to_path_buf(),
             state: RwLock::new(ToyKVState {
                 wal_index,
-                memtable,
+                active_memtable,
+                frozen_memtable,
                 sstables,
             }),
             metrics: Default::default(),
@@ -186,22 +209,22 @@ impl ToyKV {
         // Maintain a lock on the database during writing
         let mut state = self.state.write().unwrap();
 
-        state.memtable.write(k, v)?;
-        if state.memtable.wal_writes() >= self.wal_write_threshold {
+        state.active_memtable.write(k, v)?;
+        if state.active_memtable.wal_writes() >= self.wal_write_threshold {
             // This needs to happen in this order to maintain
             // our ability to reload the state from disk if
             // we crash. Probably it should be encapsulated,
             // but it's a bit hard right now due to it all
             // being bound to the state variable. Maybe once
             // we create a new sstables each time we update them.
-            let memtable = state.memtable.iter();
+            let memtable = state.active_memtable.iter();
             let fname = state.sstables.write_new_sstable(memtable)?;
             state.sstables.commit_new_sstable(fname)?;
-            state.memtable.cleanup_disk()?;
+            state.active_memtable.cleanup_disk()?;
 
             let wal_path = new_wal_path(&self.d);
             state.wal_index.set_active_wal(&wal_path)?;
-            state.memtable = Memtable::new(wal_path, self.wal_sync)?;
+            state.active_memtable = Memtable::new(wal_path, self.wal_sync)?;
             self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
@@ -221,7 +244,7 @@ impl ToyKV {
         }
 
         let state = self.state.read().unwrap();
-        let r = state.memtable.get(&k);
+        let r = state.active_memtable.get(&k);
         let r = match r {
             Some(r) => Some(r),
             None => state.sstables.get(&k)?,
@@ -260,7 +283,9 @@ impl ToyKV {
         };
 
         let state = self.state.read().unwrap();
-        let mti = state.memtable.range(lower_bound, upper_bound.clone());
+        let mti = state
+            .active_memtable
+            .range(lower_bound, upper_bound.clone());
         let iters = state.sstables.iters(start_key)?;
         drop(state);
 
