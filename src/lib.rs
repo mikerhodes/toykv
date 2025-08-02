@@ -1,5 +1,6 @@
 use memtable::Memtable;
 use std::iter::repeat_with;
+use std::mem;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -211,21 +212,39 @@ impl ToyKV {
 
         state.active_memtable.write(k, v)?;
         if state.active_memtable.wal_writes() >= self.wal_write_threshold {
-            // This needs to happen in this order to maintain
-            // our ability to reload the state from disk if
-            // we crash. Probably it should be encapsulated,
-            // but it's a bit hard right now due to it all
-            // being bound to the state variable. Maybe once
-            // we create a new sstables each time we update them.
-            let memtable = state.active_memtable.iter();
-            let fname = state.sstables.write_new_sstable(memtable)?;
-            state.sstables.commit_new_sstable(fname)?;
-            state.active_memtable.cleanup_disk()?;
+            // We're getting in stages to async frozen_memtable
+            // writes to sstables. For now, the write is still
+            // sync. At first glance it seems pointless, but
+            // in fact it allows us to update get/scan to
+            // work with the frozen memtable.
+            // Tests will get harder once writing the sstable
+            // is async. As shutdown will need to wait on the
+            // sstable writes, we can use that as a kind of
+            // barrier. But that's for later.
 
+            // First write out the frozen if there is one, leaving
+            // None in the state.
+            if let Some(_) = state.frozen_memtable {
+                let mut frozen_memtable =
+                    mem::replace(&mut state.frozen_memtable, None).unwrap();
+                let fname =
+                    state.sstables.write_new_sstable(frozen_memtable.iter())?;
+                state.sstables.commit_new_sstable(fname)?;
+                frozen_memtable.cleanup_disk()?;
+                self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // Next create a new active memtable, and freeze the
+            // previous one.
             let wal_path = new_wal_path(&self.d);
             state.wal_index.set_active_wal(&wal_path)?;
-            state.active_memtable = Memtable::new(wal_path, self.wal_sync)?;
-            self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
+            let new_memtable = Memtable::new(wal_path, self.wal_sync)?;
+            let old_active_memtable =
+                mem::replace(&mut state.active_memtable, new_memtable);
+            state
+                .wal_index
+                .set_frozen_wal(&old_active_memtable.wal_path())?;
+            state.frozen_memtable = Some(old_active_memtable);
         }
         Ok(())
     }
@@ -245,6 +264,13 @@ impl ToyKV {
 
         let state = self.state.read().unwrap();
         let r = state.active_memtable.get(&k);
+        let r = match r {
+            Some(r) => Some(r),
+            None => match &state.frozen_memtable {
+                None => None,
+                Some(x) => x.get(&k),
+            },
+        };
         let r = match r {
             Some(r) => Some(r),
             None => state.sstables.get(&k)?,
@@ -282,18 +308,24 @@ impl ToyKV {
             Some(k) => Bound::Included(k.to_vec()),
         };
 
+        let mut m = MergeIterator::<'a>::new(upper_bound.clone());
+
         let state = self.state.read().unwrap();
         let mti = state
             .active_memtable
-            .range(lower_bound, upper_bound.clone());
-        let iters = state.sstables.iters(start_key)?;
-        drop(state);
-
-        let mut m = MergeIterator::<'a>::new(upper_bound.clone());
+            .range(lower_bound.clone(), upper_bound.clone());
         m.add_iterator(mti);
-        for t in iters.into_iter() {
+
+        if let Some(x) = &state.frozen_memtable {
+            let fmti = x.range(lower_bound, upper_bound.clone());
+            m.add_iterator(fmti);
+        }
+
+        let iters = state.sstables.iters(start_key)?;
+        for t in iters {
             m.add_iterator(t);
         }
+        drop(state);
 
         Ok(KVIterator { i: m })
     }

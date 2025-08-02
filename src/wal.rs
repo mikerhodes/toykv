@@ -66,6 +66,9 @@ pub(crate) fn new(wal_path: PathBuf, sync: WALSync) -> WAL {
 // Then, and only then, should you be able to call write().
 
 impl WAL {
+    pub(super) fn wal_path(&self) -> PathBuf {
+        self.wal_path.clone()
+    }
     /// Replays the WAL into a memtable. Call this first.
     pub(crate) fn replay(
         &mut self,

@@ -26,6 +26,10 @@ impl Memtable {
         Ok(Self { memtable, wal })
     }
 
+    pub(crate) fn wal_path(&self) -> PathBuf {
+        self.wal.wal_path()
+    }
+
     pub(crate) fn write(
         &mut self,
         k: Vec<u8>,
