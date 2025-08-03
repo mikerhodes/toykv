@@ -6,7 +6,7 @@ use std::{io::Error, ops::Bound, path::Path};
 
 use error::ToyKVError;
 use kvrecord::KVValue;
-use merge_iterator::MergeIterator;
+use merge_iterator2::MergeIterator;
 use table::SSTables;
 
 mod block;
@@ -15,6 +15,7 @@ pub mod error;
 mod kvrecord;
 mod memtable;
 mod merge_iterator;
+mod merge_iterator2;
 mod table;
 mod wal;
 
