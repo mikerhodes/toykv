@@ -1,5 +1,21 @@
 #![allow(dead_code)]
-use std::{io::Error, iter::Peekable, ops::Bound};
+/// MergeIterator (v2) merges sorted iterators from LSM tree layers
+/// (memtable + SSTables). Since the same key can exist in multiple
+/// layers, we use a age system where:
+/// - Lower age number = more recent data (memtables have ages 0 and 1)
+/// - When the same key appears in multiple iterators, only the most recent
+///   key is emitted (via the lowest age).
+/// - This ensures we implement the LSM's "newer data shadows older data"
+///   semantics.
+/// - Other than age, keys are ordered lowest-first. Errors are ordered
+///   lowest of all in our min-heap, meaning that the iterator can bail
+///   immediately on an error.
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::BinaryHeap,
+    io::Error,
+    ops::Bound,
+};
 
 use crate::{error::ToyKVError, kvrecord::KVRecord};
 
@@ -16,17 +32,95 @@ type TableIterator<'a> = Box<dyn Iterator<Item = Result<KVRecord, Error>> + 'a>;
 /// added using `add_iterator`.
 pub(crate) struct MergeIterator<'a> {
     /// lsmtables are the memtables and sstables underlying this MergeIterator
-    lsmtables: Vec<Peekable<TableIterator<'a>>>,
     stopped: bool,
+    heap: MinHeap<QueueItem<'a>>,
     end_key: Bound<Vec<u8>>,
+    /// Lower age = more recent memtable/sstable
+    next_iterator_age: u32,
+    /// last_key is the last key we saw, to prevent emitting
+    /// duplicate keys.
+    last_emitted_key: Option<Vec<u8>>,
+}
+
+struct QueueItem<'a> {
+    kvrecord: Result<KVRecord, Error>,
+    iterator: TableIterator<'a>,
+    /// Lower age = more recent memtable/sstable
+    age: u32,
+}
+
+impl<'a> PartialEq for QueueItem<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl<'a> PartialOrd for QueueItem<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<'a> Eq for QueueItem<'a> {}
+impl<'a> Ord for QueueItem<'a> {
+    /// cmp orders such that the following are lower for our min-heap:
+    /// - Errors are lowest
+    /// - Then lowest keys
+    /// - Then lowest age tie-breaks
+    /// This guarantees:
+    /// 1. That we exit as early as possible on errors.
+    /// 2. That the latest written value appears first (memtables
+    ///    first, then sstables).
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (&self.kvrecord, &other.kvrecord) {
+            // Errors bubble up immediately
+            (Err(_), Ok(_)) => Ordering::Less,
+            (Ok(_), Err(_)) => Ordering::Greater,
+            (Err(_), Err(_)) => self.age.cmp(&other.age),
+            (Ok(s_kvrecord), Ok(o_kvrecord)) => {
+                // Primary sort - lexographic by key
+                s_kvrecord
+                    .key
+                    .cmp(&o_kvrecord.key)
+                    // Tie-break with age (lower age = winner)
+                    .then_with(|| self.age.cmp(&other.age))
+            }
+        }
+    }
+}
+
+/// MinHeap wraps a BinaryHeap to make it a min-heap
+/// rather than a max-heap.
+struct MinHeap<T: Ord> {
+    heap: BinaryHeap<Reverse<T>>,
+}
+
+impl<T: Ord> MinHeap<T> {
+    fn new() -> Self {
+        MinHeap {
+            heap: BinaryHeap::new(),
+        }
+    }
+
+    fn push(&mut self, item: T) {
+        self.heap.push(Reverse(item));
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.heap.pop().map(|Reverse(item)| item)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
 }
 
 impl<'a> MergeIterator<'a> {
     pub fn new(end_key: Bound<Vec<u8>>) -> Self {
         Self {
-            lsmtables: Vec::new(),
             stopped: false,
             end_key,
+            heap: MinHeap::new(),
+            next_iterator_age: 0,
+            last_emitted_key: None,
         }
     }
 
@@ -34,11 +128,21 @@ impl<'a> MergeIterator<'a> {
     where
         I: Iterator<Item = Result<KVRecord, Error>> + 'a,
     {
-        let b: TableIterator<'a> = Box::new(iter);
-        self.lsmtables.push(b.peekable());
+        let mut b: TableIterator<'a> = Box::new(iter);
+
+        // Call next to put the first item into the iterator, so
+        // we don't have to special case this in next() for MergeIterator.
+        // Only store this iterator if it's not alrady exhausted.
+        if let Some(x) = b.next() {
+            self.heap.push(QueueItem {
+                kvrecord: x,
+                iterator: b,
+                age: self.next_iterator_age,
+            });
+            self.next_iterator_age += 1;
+        }
     }
 }
-
 impl<'a> Iterator for MergeIterator<'a> {
     type Item = Result<KVRecord, ToyKVError>;
 
@@ -46,82 +150,62 @@ impl<'a> Iterator for MergeIterator<'a> {
         if self.stopped {
             return None;
         }
-        // NB:
-        // Assumes that each iterator in `sstables` contains
-        // at most one entry for a given key, and that the
-        // keys are ordered.
 
-        // Find the lowest key in our iterator set by peeking
-        // at every iterator's next value. Will naturally leave
-        // `min` at None and end this iterator when the child
-        // iters are exhausted.
-        let mut min: Option<Self::Item> = None;
-        for x in self.lsmtables.iter_mut() {
-            match x.peek() {
-                Some(Err(e)) => {
+        loop {
+            // Heap has become empty as all iterators are
+            // exhausted.
+            if self.heap.is_empty() {
+                self.stopped = true;
+                return None;
+            }
+
+            let mut heap_item = self.heap.pop().unwrap();
+
+            // Always return errors immediately and stop iteration
+            let kvrecord = match heap_item.kvrecord {
+                Err(x) => {
                     self.stopped = true;
-                    return Some(Err(ToyKVError::from(e)));
+                    return Some(Err(x.into()));
                 }
-                Some(Ok(kvr)) => {
-                    min = match min {
-                        None => Some(Ok(kvr.clone())),
-                        Some(Ok(ref minkvr)) => {
-                            if kvr.key < minkvr.key {
-                                Some(Ok(kvr.clone()))
-                            } else {
-                                min
-                            }
-                        }
-                        Some(Err(e)) => Some(Err(e)),
-                    }
+                Ok(kvr) => kvr,
+            };
+
+            // Advance the iterator, and, if it's not exhausted,
+            // re-add it to the heap.
+            if let Some(x) = heap_item.iterator.next() {
+                heap_item.kvrecord = x;
+                self.heap.push(heap_item);
+            }
+
+            // Check end key
+            match &self.end_key {
+                Bound::Included(x) if kvrecord.key > *x => {
+                    self.stopped = true;
+                    return None;
                 }
-                None => {}
+                Bound::Excluded(x) if kvrecord.key >= *x => {
+                    self.stopped = true;
+                    return None;
+                }
+                _ => (),
+            };
+
+            match &self.last_emitted_key {
+                // skip duplicate -- older version of same key
+                Some(x) if *x == kvrecord.key => continue,
+                _ => {
+                    // New key, update last_key and return
+                    self.last_emitted_key = Some(kvrecord.key.clone());
+                    return Some(Ok(kvrecord));
+                }
             }
         }
-
-        // If we found a min, advance all the iters that have
-        // a record with the same key (because we now have the
-        // correct KVRecord to return for that key in `min`)
-        if let Some(Ok(kvr)) = min.as_ref() {
-            let minkey = kvr.key.as_slice();
-            for x in self.lsmtables.iter_mut() {
-                match x.peek() {
-                    Some(Err(_e)) => {}
-                    Some(Ok(kvr)) => {
-                        if kvr.key.as_slice() == minkey {
-                            x.next(); // advance past this key
-                        }
-                    }
-                    None => {}
-                }
-            }
-        }
-
-        // If we have reached the ends of the bounds
-        // set, update min to None
-        if let Some(Ok(next_record)) = min.as_ref() {
-            min = match &self.end_key {
-                Bound::Unbounded => min,
-                Bound::Included(x) if next_record.key > *x => None,
-                Bound::Included(_) => min,
-                Bound::Excluded(x) if next_record.key >= *x => None,
-                Bound::Excluded(_) => min,
-            }
-        }
-
-        if min == None {
-            self.stopped = true;
-        }
-
-        min
     }
 }
 
 #[cfg(test)]
 mod tests_merge_iterator {
     use std::io::Error;
-
-    // use crate::kvrecord;
 
     use super::*;
 
