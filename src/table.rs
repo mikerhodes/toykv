@@ -55,25 +55,31 @@ impl SSTables {
         })
     }
 
+    pub(crate) fn bloom_hasher(&self) -> SipHasher13 {
+        self.bloom_hasher
+    }
+
+    pub(crate) fn next_sstable_fname(&self) -> PathBuf {
+        next_sstable_fname(self.d.as_path())
+    }
+
     /// Write a new SSTable to the set managed by this
     /// SSTables. After this method returns, the contents
     /// of the memtable are durable on disk and are used
     /// by future calls to `get`.
     pub(crate) fn write_new_sstable(
-        &self,
+        fname: &Path,
+        bloom_hasher: SipHasher13,
         memtable_iterator: MemtableIterator,
-    ) -> Result<PathBuf, Error> {
-        let fname = next_sstable_fname(self.d.as_path());
-
-        let mut sst =
-            TableBuilder::new(self.bloom_hasher, memtable_iterator.len());
+    ) -> Result<(), Error> {
+        let mut sst = TableBuilder::new(bloom_hasher, memtable_iterator.len());
         for entry in memtable_iterator {
             let record = entry?;
             assert!(sst.add(&record.key[..], &record.value).is_ok());
         }
-        sst.write(fname.as_path())?;
+        sst.write(&fname)?;
 
-        Ok(fname)
+        Ok(())
     }
 
     pub(crate) fn commit_new_sstable(
