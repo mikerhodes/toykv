@@ -5,12 +5,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct WALIndexFile {
     pub(crate) active_wal: Option<PathBuf>,
     pub(crate) frozen_wal: Option<PathBuf>,
 }
 
+#[derive(Debug)]
 pub(crate) struct WALIndex {
     wal_index_file: WALIndexFile,
     backing_file_path: PathBuf,
@@ -71,5 +72,14 @@ impl WALIndex {
             None => None,
             Some(x) => Some(x.clone()),
         }
+    }
+
+    /// Remove the frozen WAL from the index
+    pub(crate) fn remove_frozen_wal(&mut self) -> Result<(), Error> {
+        self.wal_index_file.frozen_wal = None;
+        fs::write(
+            &self.backing_file_path,
+            serde_json::to_string(&self.wal_index_file)?,
+        )
     }
 }

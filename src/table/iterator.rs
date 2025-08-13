@@ -23,6 +23,7 @@ use crate::{
     table::BlockMeta,
 };
 
+#[derive(Debug)]
 pub(crate) struct TableReader {
     pub(crate) p: PathBuf, // TODO remove pub after SSTablesReader doesn't need it
     f: Mutex<BufReader<File>>,

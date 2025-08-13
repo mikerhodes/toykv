@@ -29,14 +29,43 @@ pub mod iterator;
 mod tableindex;
 
 /// Manage and search a set of SSTable files on disk.
+#[derive(Debug)]
 pub(crate) struct SSTables {
     d: PathBuf,
-    sstables_index: SSTableIndex,
+    pub(crate) sstables_index: SSTableIndex, // allow printing for debug
     sstables: SSTablesReader,
 
     // Ensure we share the same hashing between
     // builder and iterator for bloom filter.
     bloom_hasher: SipHasher13,
+}
+
+pub(crate) struct SSTableWriter {
+    fname: PathBuf,
+    bloom_hasher: SipHasher13,
+}
+
+#[derive(Debug)]
+pub(crate) struct SSTableWriterResult {
+    fname: PathBuf,
+}
+
+impl SSTableWriter {
+    /// Write a new SSTable, consuming self and returning a result to
+    /// pass to SSTables::commit.
+    pub(crate) fn write(
+        self,
+        memtable_iterator: MemtableIterator,
+    ) -> Result<SSTableWriterResult, Error> {
+        let mut sst =
+            TableBuilder::new(self.bloom_hasher, memtable_iterator.len());
+        for entry in memtable_iterator {
+            let record = entry?;
+            assert!(sst.add(&record.key[..], &record.value).is_ok());
+        }
+        sst.write(&self.fname)?;
+        Ok(SSTableWriterResult { fname: self.fname })
+    }
 }
 
 impl SSTables {
@@ -55,39 +84,21 @@ impl SSTables {
         })
     }
 
-    pub(crate) fn bloom_hasher(&self) -> SipHasher13 {
-        self.bloom_hasher
-    }
-
-    pub(crate) fn next_sstable_fname(&self) -> PathBuf {
-        next_sstable_fname(self.d.as_path())
-    }
-
-    /// Write a new SSTable to the set managed by this
-    /// SSTables. After this method returns, the contents
-    /// of the memtable are durable on disk and are used
-    /// by future calls to `get`.
-    pub(crate) fn write_new_sstable(
-        fname: &Path,
-        bloom_hasher: SipHasher13,
-        memtable_iterator: MemtableIterator,
-    ) -> Result<(), Error> {
-        let mut sst = TableBuilder::new(bloom_hasher, memtable_iterator.len());
-        for entry in memtable_iterator {
-            let record = entry?;
-            assert!(sst.add(&record.key[..], &record.value).is_ok());
+    /// Build a single-use sstable writer. Use to write
+    /// a single memtable using the `write` method.
+    pub(crate) fn build_sstable_writer(&self) -> SSTableWriter {
+        SSTableWriter {
+            fname: next_sstable_fname(self.d.as_path()),
+            bloom_hasher: self.bloom_hasher,
         }
-        sst.write(&fname)?;
-
-        Ok(())
     }
 
     pub(crate) fn commit_new_sstable(
         &mut self,
-        fname: PathBuf,
+        w: SSTableWriterResult,
     ) -> Result<(), Error> {
         // Commit the new sstable to the index.
-        self.sstables_index.levels.l0.insert(0, fname);
+        self.sstables_index.levels.l0.insert(0, w.fname);
         self.sstables_index.write()?;
 
         // Load new SSTablesReader for the new state.
@@ -113,6 +124,7 @@ impl SSTables {
     }
 }
 /// Iterate entries in an on-disk SSTable.
+#[derive(Debug)]
 struct SSTablesReader {
     /// tables maintains a set of BufReaders on every sstable
     /// file in the set. This isn't that scalable.
