@@ -226,9 +226,8 @@ impl ToyKV {
         };
 
         // Maintain a lock on the database during writing
-        let do_flush = if wal_writes >= self.wal_write_threshold {
-            // If we are already flushing, we need that to
-            // complete so we can replace the frozen memtable.
+        if wal_writes >= self.wal_write_threshold {
+            // Block while any existing flush completes
             {
                 let mut flushing = flush_mutex.lock().unwrap();
                 while *flushing {
@@ -250,6 +249,7 @@ impl ToyKV {
                 false
             } else {
                 *flush_mutex.lock().unwrap() = true;
+
                 // Create a new active memtable
                 let wal_path = new_wal_path(&self.d);
                 w_guard.wal_index.set_active_wal(&wal_path)?;
@@ -266,6 +266,18 @@ impl ToyKV {
                 w_guard.active_memtable.write(k, v)?;
 
                 // We need to flush the frozen memtable
+                let new_thread_state = self.state.clone();
+                let _handler = thread::spawn(move || {
+                    ToyKV::flush_frozen_memtable(new_thread_state);
+                });
+                // _handler.join().expect("interrupted");
+                // TODO join on shutdown for safety
+                // this might be much easier with a single background
+                // worker thread that we can join. It can have the Arc of
+                // the state all the time. We can use a channel to push
+                // work?
+                // self flushing_handler = handler then join it in shutdown()
+                self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
                 true
             }
         } else {
@@ -275,24 +287,6 @@ impl ToyKV {
             false // no need to flush
         };
 
-        if do_flush {
-            // Now kick off a thread for flushing
-            // Clone the RwLock state for the new thread, and kick
-            // it off.
-            let new_thread_state = self.state.clone();
-            let _handler = thread::spawn(move || {
-                ToyKV::flush_frozen_memtable(new_thread_state);
-            });
-            // _handler.join().expect("interrupted");
-            // TODO join on shutdown for safety
-            // this might be much easier with a single background
-            // worker thread that we can join. It can have the Arc of
-            // the state all the time. We can use a channel to push
-            // work?
-            // self flushing_handler = handler then join it in shutdown()
-            self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
-        }
-
         Ok(())
     }
 
@@ -300,6 +294,11 @@ impl ToyKV {
     /// errors will panic; `state` will be poisoned if there is an error
     /// committing the new memtable to indexes.
     fn flush_frozen_memtable(state: Arc<RwLock<ToyKVState>>) {
+        // I wonder if a given call to this should be given
+        // a specific memtable to flush. It feels a little
+        // slapdash right now, or at least hard to be sure
+        // everything interleaves correctly.
+        //
         // Grab a read lock and extract everything from the state
         // that we need.
         let (flush_mutex, flush_condvar, w, frozen_memtable) = {
@@ -319,29 +318,33 @@ impl ToyKV {
             // Now write out the memtable in the thread.
             // If this fails, it's safe to retry later,
             // so we don't need to poison the state RwLock.
-            let r = w.write(fm.iter()).expect("Failed to write new sstable.");
+            match w.write(fm.iter()) {
+                Ok(r) => {
+                    // Success, write out new state
+                    let mut w_guard = state.write().unwrap();
 
-            // Update the state
-            {
-                let mut w_guard = state.write().unwrap();
+                    // The commit_new_sstable and remove_frozen_wal calls
+                    // are set up to panic on failure so `state` gets
+                    // poisoned and the main app will crash. Restarting
+                    // is safest at this point, reloading the frozen
+                    // memtable from WAL. It's safe to reload the frozen
+                    // memtable even if commit_new_sstable succeeds because
+                    // the sstable and the WAL file contain the same data.
+                    // TODO this would be safer if there was just one file.
 
-                // The commit_new_sstable and remove_frozen_wal calls
-                // are set up to panic on failure so `state` gets
-                // poisoned and the main app will crash. Restarting
-                // is safest at this point, reloading the frozen
-                // memtable from WAL. It's safe to reload the frozen
-                // memtable even if commit_new_sstable succeeds because
-                // the sstable and the WAL file contain the same data.
-                // TODO this would be safer if there was just one file.
-
-                w_guard.sstables.commit_new_sstable(r).expect(
-                    "Error while committing new sstable; restart for safety.",
-                );
-                w_guard.wal_index.remove_frozen_wal().expect(
-                    "Error while committing WAL index; restart for safety.",
-                );
-                w_guard.frozen_memtable = None;
-            }
+                    w_guard.sstables.commit_new_sstable(r).expect(
+                        "Error committing new sstable; restart for safety.",
+                    );
+                    w_guard.wal_index.remove_frozen_wal().expect(
+                        "Error committing WAL index; restart for safety.",
+                    );
+                    w_guard.frozen_memtable = None;
+                }
+                Err(_) => {
+                    // Failed.
+                    // Nothing extra to do here.
+                }
+            };
         }
 
         // Flush is complete, wake everyone up.
