@@ -5,13 +5,13 @@ use std::{
     path::PathBuf,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SSTableIndexLevels {
     // Just one level for now
     pub(crate) l0: Vec<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SSTableIndex {
     pub(crate) levels: SSTableIndexLevels,
 

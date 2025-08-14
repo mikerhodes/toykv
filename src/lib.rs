@@ -1,8 +1,11 @@
 use memtable::Memtable;
+use std::iter::repeat_with;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::{io::Error, ops::Bound, path::Path};
+use std::{mem, thread};
+use walindex::WALIndex;
 
 use error::ToyKVError;
 use kvrecord::KVValue;
@@ -18,6 +21,7 @@ mod merge_iterator;
 mod merge_iterator2;
 mod table;
 mod wal;
+mod walindex;
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum WALSync {
@@ -39,13 +43,27 @@ pub struct ToyKV {
     pub metrics: ToyKVMetrics,
     wal_write_threshold: u64,
     wal_sync: WALSync,
-    state: RwLock<ToyKVState>,
+    state: Arc<RwLock<ToyKVState>>,
 }
 
 /// ToyKVState is the modifiable state of the database.
 struct ToyKVState {
-    memtable: Memtable,
+    wal_index: WALIndex,
+
+    /// active_memtable stores new writes before they
+    /// are moved to sstables. They have a WAL for
+    /// durability.
+    active_memtable: Memtable,
+    /// frozen_memtable exists to be written to disk
+    /// in the background, such that we can still
+    /// accept writes to the active memtable.
+    frozen_memtable: Option<Arc<Memtable>>,
+    /// sstables are the on-disk primary database
+    /// storage.
     sstables: SSTables,
+    /// Set to true while frozen_memtable is being
+    /// written
+    flushing: (Arc<Mutex<bool>>, Arc<Condvar>),
 }
 
 struct ToyKVOptions {
@@ -96,16 +114,55 @@ impl ToyKVBuilder {
             return Err(ToyKVError::DataDirMissing);
         }
 
-        let memtable = Memtable::new(d, self.options.wal_sync)?;
+        let wal_index_path = d.join("wal_index.json");
+        let mut wal_index = WALIndex::open(wal_index_path)?;
+
+        // If there is a WAL on disk, load the active memtable
+        // from it, otherwise initialise a memtable with a fresh
+        // WAL file on disk.
+        let active_wal_path = match wal_index.active_wal() {
+            None => new_wal_path(d),
+            Some(x) => x,
+        };
+        wal_index.set_active_wal(&active_wal_path)?;
+        println!("builder: load active memtable (if any)");
+        let active_memtable =
+            Memtable::new(active_wal_path, self.options.wal_sync)?;
+
+        // Unlike active memtable, we don't need to have a frozen
+        // memtable unless we exited running before we managed
+        // to save the frozen memtable to disk. Mostly the
+        // frozen memtable is transient, as it's saved to disk
+        // almost immediately.
+        println!("builder: load frozen memtable (if any)");
+        let frozen_memtable = match wal_index.frozen_wal() {
+            None => None,
+            Some(x) => Some(Arc::new(Memtable::new(x, self.options.wal_sync)?)),
+        };
+
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
             d: d.to_path_buf(),
-            state: RwLock::new(ToyKVState { memtable, sstables }),
+            state: Arc::new(RwLock::new(ToyKVState {
+                wal_index,
+                active_memtable,
+                frozen_memtable,
+                sstables,
+                flushing: (
+                    Arc::new(Mutex::new(false)),
+                    Arc::new(Condvar::new()),
+                ),
+            })),
             metrics: Default::default(),
             wal_write_threshold: self.options.wal_write_threshold,
             wal_sync: self.options.wal_sync,
         })
     }
+}
+
+fn new_wal_path(dir: &Path) -> PathBuf {
+    let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
+    dir.join(format!("{}.wal", s))
 }
 
 /// Open a database using default settings.
@@ -159,26 +216,146 @@ impl ToyKV {
 
     /// Internal method to write a KVValue to WAL and memtable
     fn write(&self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
+        let (flush_mutex, flush_condvar, wal_writes) = {
+            let guard = self.state.read().unwrap();
+            (
+                guard.flushing.0.clone(),
+                guard.flushing.1.clone(),
+                guard.active_memtable.wal_writes(),
+            )
+        };
+
         // Maintain a lock on the database during writing
-        let mut state = self.state.write().unwrap();
+        if wal_writes >= self.wal_write_threshold {
+            // Block while any existing flush completes
+            {
+                let mut flushing = flush_mutex.lock().unwrap();
+                while *flushing {
+                    println!("waiting for flushing");
+                    flushing = flush_condvar.wait(flushing).unwrap();
+                }
+            }
 
-        state.memtable.write(k, v)?;
-        if state.memtable.wal_writes() >= self.wal_write_threshold {
-            // This needs to happen in this order to maintain
-            // our ability to reload the state from disk if
-            // we crash. Probably it should be encapsulated,
-            // but it's a bit hard right now due to it all
-            // being bound to the state variable. Maybe once
-            // we create a new sstables each time we update them.
-            let memtable = state.memtable.iter();
-            let fname = state.sstables.write_new_sstable(memtable)?;
-            state.sstables.commit_new_sstable(fname)?;
-            state.memtable.cleanup_disk()?;
+            let mut w_guard = self.state.write().unwrap();
 
-            state.memtable = Memtable::new(&self.d, self.wal_sync)?;
-            self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
-        }
+            // If there are several write threads trying to write during
+            // a flush, they will all be woken up and race for the write
+            // lock. The first will freeze the active memtable and kick
+            // off a new async flush, if so, we should not start a new one,
+            // as we would be flushing a new active memtable rather than
+            // a full one.
+            if *flush_mutex.lock().unwrap() {
+                // No need to flush the memtable if already flushing
+                false
+            } else {
+                *flush_mutex.lock().unwrap() = true;
+
+                // Create a new active memtable
+                let wal_path = new_wal_path(&self.d);
+                w_guard.wal_index.set_active_wal(&wal_path)?;
+                let new_memtable = Memtable::new(wal_path, self.wal_sync)?;
+                // Set the new memtable active
+                let old_active_memtable =
+                    mem::replace(&mut w_guard.active_memtable, new_memtable);
+                // Set the previous active memtable to the frozen one
+                w_guard
+                    .wal_index
+                    .set_frozen_wal(&old_active_memtable.wal_path())?;
+                w_guard.frozen_memtable = Some(Arc::new(old_active_memtable));
+                // Make write visible via memtable now it's persisted to WAL
+                w_guard.active_memtable.write(k, v)?;
+
+                // We need to flush the frozen memtable
+                let new_thread_state = self.state.clone();
+                let _handler = thread::spawn(move || {
+                    ToyKV::flush_frozen_memtable(new_thread_state);
+                });
+                // _handler.join().expect("interrupted");
+                // TODO join on shutdown for safety
+                // this might be much easier with a single background
+                // worker thread that we can join. It can have the Arc of
+                // the state all the time. We can use a channel to push
+                // work?
+                // self flushing_handler = handler then join it in shutdown()
+                self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+        } else {
+            // Just need to make visibile in the active_memtable
+            let mut w_guard = self.state.write().unwrap();
+            w_guard.active_memtable.write(k, v)?;
+            false // no need to flush
+        };
+
         Ok(())
+    }
+
+    /// Flush the frozen_memtable; safe to call from a separate thread as
+    /// errors will panic; `state` will be poisoned if there is an error
+    /// committing the new memtable to indexes.
+    fn flush_frozen_memtable(state: Arc<RwLock<ToyKVState>>) {
+        // I wonder if a given call to this should be given
+        // a specific memtable to flush. It feels a little
+        // slapdash right now, or at least hard to be sure
+        // everything interleaves correctly.
+        //
+        // Grab a read lock and extract everything from the state
+        // that we need.
+        let (flush_mutex, flush_condvar, w, frozen_memtable) = {
+            let guard = state.read().unwrap();
+            (
+                guard.flushing.0.clone(),
+                guard.flushing.1.clone(),
+                guard.sstables.build_sstable_writer(),
+                match &guard.frozen_memtable {
+                    None => None,
+                    Some(fm) => Some(fm.clone()),
+                },
+            )
+        };
+
+        if let Some(fm) = frozen_memtable {
+            // Now write out the memtable in the thread.
+            // If this fails, it's safe to retry later,
+            // so we don't need to poison the state RwLock.
+            match w.write(fm.iter()) {
+                Ok(r) => {
+                    // Success, write out new state
+                    let mut w_guard = state.write().unwrap();
+
+                    // The commit_new_sstable and remove_frozen_wal calls
+                    // are set up to panic on failure so `state` gets
+                    // poisoned and the main app will crash. Restarting
+                    // is safest at this point, reloading the frozen
+                    // memtable from WAL. It's safe to reload the frozen
+                    // memtable even if commit_new_sstable succeeds because
+                    // the sstable and the WAL file contain the same data.
+                    // TODO this would be safer if there was just one file.
+
+                    w_guard.sstables.commit_new_sstable(r).expect(
+                        "Error committing new sstable; restart for safety.",
+                    );
+                    w_guard.wal_index.remove_frozen_wal().expect(
+                        "Error committing WAL index; restart for safety.",
+                    );
+                    w_guard.frozen_memtable = None;
+                }
+                Err(_) => {
+                    // Failed.
+                    // Nothing extra to do here.
+                }
+            };
+        }
+
+        // Flush is complete, wake everyone up.
+        *flush_mutex.lock().unwrap() = false;
+        flush_condvar.notify_all();
+
+        // TODO To remove the orphaned WAL we should
+        // execute a cleanup that removes all the
+        // files that are not in the SSTable index
+        // or the WAL index.
+        // We could safely do that in this thread.
     }
 
     /// Get the value for k.
@@ -195,7 +372,14 @@ impl ToyKV {
         }
 
         let state = self.state.read().unwrap();
-        let r = state.memtable.get(&k);
+        let r = state.active_memtable.get(&k);
+        let r = match r {
+            Some(r) => Some(r),
+            None => match &state.frozen_memtable {
+                None => None,
+                Some(x) => x.get(&k),
+            },
+        };
         let r = match r {
             Some(r) => Some(r),
             None => state.sstables.get(&k)?,
@@ -216,7 +400,11 @@ impl ToyKV {
         Ok(r)
     }
     /// Perform a graceful shutdown.
-    pub fn shutdown(&mut self) {}
+    pub fn shutdown(&mut self) {
+        let guard = self.state.read().unwrap();
+        dbg!(&guard.wal_index);
+        // dbg!(&guard.sstables.sstables_index);
+    }
 
     // /// Immediately terminate (for use during testing, "pretend to crash")
     // pub(crate) fn terminate(&mut self) {}
@@ -233,16 +421,24 @@ impl ToyKV {
             Some(k) => Bound::Included(k.to_vec()),
         };
 
-        let state = self.state.read().unwrap();
-        let mti = state.memtable.range(lower_bound, upper_bound.clone());
-        let iters = state.sstables.iters(start_key)?;
-        drop(state);
-
         let mut m = MergeIterator::<'a>::new(upper_bound.clone());
+
+        let state = self.state.read().unwrap();
+        let mti = state
+            .active_memtable
+            .range(lower_bound.clone(), upper_bound.clone());
         m.add_iterator(mti);
-        for t in iters.into_iter() {
+
+        if let Some(x) = &state.frozen_memtable {
+            let fmti = x.range(lower_bound, upper_bound.clone());
+            m.add_iterator(fmti);
+        }
+
+        let iters = state.sstables.iters(start_key)?;
+        for t in iters {
             m.add_iterator(t);
         }
+        drop(state);
 
         Ok(KVIterator { i: m })
     }

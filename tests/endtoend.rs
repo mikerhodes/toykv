@@ -70,7 +70,7 @@ fn data_survive_restart() -> Result<(), ToyKVError> {
 fn write_and_read_sstable() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
-    let writes = 2500i64;
+    let writes = 3500i64;
 
     let mut db = ToyKVBuilder::new()
         .wal_sync(WALSync::Off)
@@ -116,7 +116,7 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
 fn deletes() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
-    let writes = 2500i64;
+    let writes = 4500i64;
 
     let mut db = ToyKVBuilder::new()
         .wal_sync(WALSync::Off)
@@ -136,7 +136,7 @@ fn deletes() -> Result<(), ToyKVError> {
             Err(err) => return Err(err),
         };
     }
-    assert_eq!(2, db.metrics.sst_flushes.load(Ordering::Relaxed));
+    assert_eq!(3, db.metrics.sst_flushes.load(Ordering::Relaxed));
     assert_eq!(writes as u64 + 1, db.metrics.writes.load(Ordering::Relaxed));
     assert_eq!(2, db.metrics.reads.load(Ordering::Relaxed));
     assert_eq!(1, db.metrics.deletes.load(Ordering::Relaxed));
@@ -154,7 +154,8 @@ fn deletes() -> Result<(), ToyKVError> {
             Err(err) => return Err(err),
         };
     }
-    assert_eq!(5, db.metrics.sst_flushes.load(Ordering::Relaxed)); // 5000 writes => 5 flushes
+    // 9003 writes => 8 flushes
+    assert_eq!(8, db.metrics.sst_flushes.load(Ordering::Relaxed));
     assert_eq!(
         writes as u64 * 2 + 3,
         db.metrics.writes.load(Ordering::Relaxed)
@@ -551,12 +552,12 @@ fn overwrite_same_key_multiple_times() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     // Overwrite many times -- ensure in sstables
-    for i in 0..2500 {
+    for i in 0..3500 {
         db.set("key", format!("value{}", i))?;
     }
 
-    assert_eq!(db.get("key")?.unwrap(), b"value2499");
-    assert_eq!(db.metrics.writes.load(Ordering::Relaxed), 2500);
+    assert_eq!(db.get("key")?.unwrap(), b"value3499");
+    assert_eq!(db.metrics.writes.load(Ordering::Relaxed), 3500);
     assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 2);
 
     Ok(())
@@ -567,10 +568,11 @@ fn wal_threshold_boundary() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
     let db = ToyKVBuilder::new()
         .wal_sync(WALSync::Off)
-        .wal_write_threshold(1000)
+        .wal_write_threshold(500)
         .open(tmp_dir.path())?;
 
-    // Write exactly 999 items (one less than threshold)
+    // Write exactly 999 items (one less than 2*threshold,
+    // so fills both active and frozen memtable)
     for i in 0..999 {
         db.set(format!("key{}", i), format!("value{}", i))?;
     }
@@ -580,8 +582,8 @@ fn wal_threshold_boundary() -> Result<(), ToyKVError> {
     db.set("key999", "value999")?;
     assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 1);
 
-    // Write 1000 more - should trigger another flush
-    for i in 1000..2000 {
+    // Write 500 more - should trigger another flush
+    for i in 1000..1500 {
         db.set(format!("key{}", i), format!("value{}", i))?;
     }
     assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 2);
@@ -728,8 +730,9 @@ fn mixed_operations_across_sstable_flushes() -> Result<(), ToyKVError> {
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
-    // First batch - will be in SSTable after flush
-    for i in 0..1000 {
+    // First batch - will be in SSTable after flush of the frozen
+    // memtable (ie, two wal_write_thresholds in).
+    for i in 0..2000 {
         db.set(format!("first_{}", i), format!("value_{}", i))?;
     }
     assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 1);
