@@ -729,7 +729,7 @@ fn mixed_operations_across_sstable_flushes() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     // First batch - will be in SSTable after flush
-    for i in 0..1000 {
+    for i in 0..2000 {
         db.set(format!("first_{}", i), format!("value_{}", i))?;
     }
     assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 1);
@@ -743,13 +743,13 @@ fn mixed_operations_across_sstable_flushes() -> Result<(), ToyKVError> {
     for i in 0..1000 {
         db.set(format!("second_{}", i), format!("value2_{}", i))?;
     }
-    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 2);
+    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 3);
 
     // Verify reads work correctly across memtable and SSTable
     for i in 0..500 {
         assert_eq!(db.get(format!("first_{}", i))?, None); // Deleted
     }
-    for i in 500..1000 {
+    for i in 500..2000 {
         assert_eq!(
             db.get(format!("first_{}", i))?.unwrap(),
             format!("value_{}", i).as_bytes()

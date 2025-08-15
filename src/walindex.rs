@@ -57,7 +57,7 @@ impl WALIndex {
             Some(x) => Some(x.clone()),
         }
     }
-    /// Set active WAL and write the index file
+
     pub(crate) fn set_frozen_wal(&mut self, p: &Path) -> Result<(), Error> {
         self.wal_index_file.frozen_wal = Some(p.to_path_buf());
         fs::write(
@@ -71,5 +71,14 @@ impl WALIndex {
             None => None,
             Some(x) => Some(x.clone()),
         }
+    }
+
+    /// Remove the frozen WAL from the index
+    pub(crate) fn remove_frozen_wal(&mut self) -> Result<(), Error> {
+        self.wal_index_file.frozen_wal = None;
+        fs::write(
+            &self.backing_file_path,
+            serde_json::to_string(&self.wal_index_file)?,
+        )
     }
 }
