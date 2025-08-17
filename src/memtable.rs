@@ -1,5 +1,6 @@
 use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::SkipMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::{io::Error, ops::Bound};
 
@@ -17,12 +18,22 @@ pub(crate) struct Memtable {
 
 impl Memtable {
     pub(crate) fn new(
-        d: &std::path::Path,
+        wal_path: PathBuf,
         wal_sync: crate::WALSync,
     ) -> Result<Self, ToyKVError> {
-        let mut wal = wal::new(d, wal_sync);
+        let mut wal = wal::new(wal_path, wal_sync);
         let memtable = Arc::new(wal.replay()?);
         Ok(Self { memtable, wal })
+    }
+
+    // An opaque ID for the memtable
+    pub(crate) fn id(&self) -> String {
+        self.wal.wal_path().to_str().unwrap().to_string()
+    }
+
+    // Path to the WAL on disk
+    pub(crate) fn wal_path(&self) -> PathBuf {
+        self.wal.wal_path().clone()
     }
 
     pub(crate) fn write(

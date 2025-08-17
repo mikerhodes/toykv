@@ -10,6 +10,8 @@ pub enum ToyKVError {
     KeyEmpty,
     ValueEmpty,
     DatabaseShutdown,
+    // memtables are full and a flush is needed
+    NeedFlush,
 }
 
 impl From<&std::io::Error> for ToyKVError {

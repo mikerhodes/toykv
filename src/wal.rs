@@ -4,7 +4,7 @@ use crossbeam_skiplist::SkipMap;
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Error, Read, Seek, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use crate::{
@@ -49,9 +49,9 @@ pub(crate) struct WAL {
     pub(crate) wal_writes: u64,
 }
 
-pub(crate) fn new(d: &Path, sync: WALSync) -> WAL {
+pub(crate) fn new(wal_path: PathBuf, sync: WALSync) -> WAL {
     WAL {
-        wal_path: d.join("db.wal"),
+        wal_path,
         f: None,
         sync,
         nextseq: 0,
@@ -159,6 +159,10 @@ impl WAL {
         self.nextseq += 1;
 
         Ok(())
+    }
+
+    pub(crate) fn wal_path(&self) -> PathBuf {
+        self.wal_path.clone()
     }
 
     /// Delete the WAL file from disk.

@@ -1,5 +1,4 @@
-use memtable::Memtable;
-use std::path::PathBuf;
+use memtables::Memtables;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::{io::Error, ops::Bound, path::Path};
@@ -14,10 +13,12 @@ mod blockiterator;
 pub mod error;
 mod kvrecord;
 mod memtable;
+mod memtables;
 mod merge_iterator;
 mod merge_iterator2;
 mod table;
 mod wal;
+mod walindex;
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum WALSync {
@@ -35,17 +36,18 @@ pub struct ToyKVMetrics {
 
 pub struct ToyKV {
     /// d is the folder that the KV store owns.
-    d: PathBuf,
     pub metrics: ToyKVMetrics,
-    wal_write_threshold: u64,
-    wal_sync: WALSync,
     state: RwLock<ToyKVState>,
 }
 
 /// ToyKVState is the modifiable state of the database.
 struct ToyKVState {
-    memtable: Memtable,
+    /// sstables are the on-disk primary database
+    /// storage.
     sstables: SSTables,
+
+    /// memtables are the in memory tables
+    memtables: Memtables,
 }
 
 struct ToyKVOptions {
@@ -96,14 +98,18 @@ impl ToyKVBuilder {
             return Err(ToyKVError::DataDirMissing);
         }
 
-        let memtable = Memtable::new(d, self.options.wal_sync)?;
+        let memtables = Memtables::new(
+            d.to_path_buf(),
+            self.options.wal_sync,
+            self.options.wal_write_threshold,
+        )?;
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
-            d: d.to_path_buf(),
-            state: RwLock::new(ToyKVState { memtable, sstables }),
+            state: RwLock::new(ToyKVState {
+                memtables,
+                sstables,
+            }),
             metrics: Default::default(),
-            wal_write_threshold: self.options.wal_write_threshold,
-            wal_sync: self.options.wal_sync,
         })
     }
 }
@@ -137,7 +143,6 @@ impl ToyKV {
         if v.len() > MAX_VALUE_SIZE {
             return Err(ToyKVError::ValueTooLarge);
         }
-        self.metrics.writes.fetch_add(1, Ordering::Relaxed);
         self.write(k, kvrecord::KVValue::Some(v))
     }
 
@@ -153,29 +158,49 @@ impl ToyKV {
         if k.len() > MAX_KEY_SIZE {
             return Err(ToyKVError::KeyTooLarge);
         }
-        self.metrics.deletes.fetch_add(1, Ordering::Relaxed);
         self.write(k, KVValue::Deleted)
     }
 
     /// Internal method to write a KVValue to WAL and memtable
     fn write(&self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
-        // Maintain a lock on the database during writing
         let mut state = self.state.write().unwrap();
+        if state.memtables.needs_flush() {
+            return Err(ToyKVError::NeedFlush);
+        }
+        match v {
+            KVValue::Deleted => {
+                self.metrics.deletes.fetch_add(1, Ordering::Relaxed);
+            }
+            KVValue::Some(_) => {
+                self.metrics.writes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        state.memtables.write(k, v)?;
+        Ok(())
+    }
 
-        state.memtable.write(k, v)?;
-        if state.memtable.wal_writes() >= self.wal_write_threshold {
-            // This needs to happen in this order to maintain
-            // our ability to reload the state from disk if
-            // we crash. Probably it should be encapsulated,
-            // but it's a bit hard right now due to it all
-            // being bound to the state variable. Maybe once
-            // we create a new sstables each time we update them.
-            let memtable = state.memtable.iter();
-            let fname = state.sstables.write_new_sstable(memtable)?;
-            state.sstables.commit_new_sstable(fname)?;
-            state.memtable.cleanup_disk()?;
-
-            state.memtable = Memtable::new(&self.d, self.wal_sync)?;
+    /// Flush the oldest memtable to disk and discard it.
+    /// Periodically call this from a background thread,
+    /// or when set or delete is rejected with ToyKVError::NeedFlush.
+    pub fn flush_oldest_memtable(&self) -> Result<(), ToyKVError> {
+        let mut state = self.state.write().unwrap();
+        if state.memtables.can_flush() {
+            // TODO
+            // Later, add thread that periodically checks
+            // for frozen memtables and flushes; meaning the
+            // rejected write is backpressure.
+            // Add vec of frozen tables, so user can tune
+            // for the write rate vs. memory used?
+            let w = state.sstables.build_sstable_writer();
+            let (r, id) = state.memtables.write_oldest_memtable(w)?;
+            state
+                .sstables
+                .commit_new_sstable(r)
+                .expect("Error committing new sstable; restart for safety.");
+            state
+                .memtables
+                .drop_memtable(id)
+                .expect("Error dropping old memtable; restart for safety.");
             self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
@@ -194,14 +219,14 @@ impl ToyKV {
             return Err(ToyKVError::KeyTooLarge);
         }
 
-        let state = self.state.read().unwrap();
-        let r = state.memtable.get(&k);
-        let r = match r {
-            Some(r) => Some(r),
-            None => state.sstables.get(&k)?,
+        let r = {
+            let state = self.state.read().unwrap();
+            let r = state.memtables.get(&k);
+            match r {
+                Some(r) => Some(r),
+                None => state.sstables.get(&k)?,
+            }
         };
-        drop(state);
-
         // This is the moment where we consume the KVValue::Deleted
         // to hide it from the caller.
         let r = match r {
@@ -234,13 +259,15 @@ impl ToyKV {
         };
 
         let state = self.state.read().unwrap();
-        let mti = state.memtable.range(lower_bound, upper_bound.clone());
-        let iters = state.sstables.iters(start_key)?;
+        let mt_iters = state.memtables.iters(lower_bound, upper_bound.clone());
+        let sst_iters = state.sstables.iters(start_key)?;
         drop(state);
 
         let mut m = MergeIterator::<'a>::new(upper_bound.clone());
-        m.add_iterator(mti);
-        for t in iters.into_iter() {
+        for t in mt_iters.into_iter() {
+            m.add_iterator(t);
+        }
+        for t in sst_iters.into_iter() {
             m.add_iterator(t);
         }
 

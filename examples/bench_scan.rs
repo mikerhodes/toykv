@@ -19,9 +19,13 @@ fn main() -> Result<(), ToyKVError> {
     );
 
     let now = Instant::now();
-    for n in 1..(writes + 1) {
+    let mut n = 0;
+    while n < writes + 1 {
         match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
-            Ok(it) => it,
+            Ok(_) => n = n + 1,
+            Err(ToyKVError::NeedFlush) => {
+                db.flush_oldest_memtable()?;
+            }
             Err(err) => return Err(err),
         };
     }

@@ -1,6 +1,6 @@
 use std::{ops::Bound, sync::atomic::Ordering};
 
-use toykv::{error::ToyKVError, ToyKVBuilder, WALSync};
+use toykv::{error::ToyKVError, ToyKV, ToyKVBuilder, WALSync};
 
 #[test]
 fn insert_and_readback() -> Result<(), ToyKVError> {
@@ -78,14 +78,11 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     for n in 1..(writes + 1) {
-        match db.set(n.to_be_bytes(), n.to_le_bytes()) {
-            Ok(it) => it,
-            Err(err) => return Err(err),
-        };
+        set_with_flush_if_needed(&db, n.to_be_bytes(), n.to_le_bytes())?;
     }
-    assert_eq!(2, db.metrics.sst_flushes.load(Ordering::Relaxed));
-    assert_eq!(writes as u64, db.metrics.writes.load(Ordering::Relaxed));
-    assert_eq!(0, db.metrics.reads.load(Ordering::Relaxed));
+    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 1);
+    assert_eq!(db.metrics.writes.load(Ordering::Relaxed), writes as u64);
+    assert_eq!(db.metrics.reads.load(Ordering::Relaxed), 0);
     for n in 1..(writes + 1) {
         dbg!("read loop db1");
         let got = db.get(n.to_be_bytes())?;
@@ -95,6 +92,7 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
             "Did not read back what we put in"
         );
     }
+    assert_eq!(db.metrics.reads.load(Ordering::Relaxed), 2500);
     db.shutdown();
 
     let db2 = toykv::open(tmp_dir.path())?;
@@ -107,6 +105,7 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
             "Did not read back what we put in"
         );
     }
+    assert_eq!(db2.metrics.reads.load(Ordering::Relaxed), 2500);
 
     Ok(())
 }
@@ -131,12 +130,13 @@ fn deletes() -> Result<(), ToyKVError> {
     assert!(matches!(db.get(k)?, None));
 
     for n in 1..(writes + 1) {
-        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
-            Ok(it) => it,
-            Err(err) => return Err(err),
-        };
+        set_with_flush_if_needed(
+            &db,
+            n.to_be_bytes().to_vec(),
+            n.to_le_bytes().to_vec(),
+        )?;
     }
-    assert_eq!(2, db.metrics.sst_flushes.load(Ordering::Relaxed));
+    assert_eq!(1, db.metrics.sst_flushes.load(Ordering::Relaxed));
     assert_eq!(writes as u64 + 1, db.metrics.writes.load(Ordering::Relaxed));
     assert_eq!(2, db.metrics.reads.load(Ordering::Relaxed));
     assert_eq!(1, db.metrics.deletes.load(Ordering::Relaxed));
@@ -149,12 +149,13 @@ fn deletes() -> Result<(), ToyKVError> {
 
     db.set(k, "blorp")?;
     for n in 1..(writes + 1) {
-        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
-            Ok(it) => it,
-            Err(err) => return Err(err),
-        };
+        set_with_flush_if_needed(
+            &db,
+            n.to_be_bytes().to_vec(),
+            n.to_le_bytes().to_vec(),
+        )?;
     }
-    assert_eq!(5, db.metrics.sst_flushes.load(Ordering::Relaxed)); // 5000 writes => 5 flushes
+    assert_eq!(4, db.metrics.sst_flushes.load(Ordering::Relaxed));
     assert_eq!(
         writes as u64 * 2 + 3,
         db.metrics.writes.load(Ordering::Relaxed)
@@ -225,10 +226,11 @@ fn scan() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     for n in 1..(writes + 1) {
-        match db.set(ordered_bytes(n).to_vec(), n.to_le_bytes().to_vec()) {
-            Ok(it) => it,
-            Err(err) => return Err(err),
-        };
+        set_with_flush_if_needed(
+            &db,
+            ordered_bytes(n).to_vec(),
+            n.to_le_bytes().to_vec(),
+        )?;
     }
 
     let mut cnt = 0;
@@ -275,10 +277,11 @@ fn scan_seek_key_check_next() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     for n in 1..(writes + 1) {
-        match db.set(ordered_bytes(n).to_vec(), n.to_le_bytes().to_vec()) {
-            Ok(it) => it,
-            Err(err) => return Err(err),
-        };
+        set_with_flush_if_needed(
+            &db,
+            ordered_bytes(n).to_vec(),
+            n.to_le_bytes().to_vec(),
+        )?;
     }
 
     // check the first keys
@@ -328,10 +331,11 @@ fn scan_on_reopen() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     for n in 1..(writes + 1) {
-        match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
-            Ok(it) => it,
-            Err(err) => return Err(err),
-        };
+        set_with_flush_if_needed(
+            &db,
+            n.to_be_bytes().to_vec(),
+            n.to_le_bytes().to_vec(),
+        )?;
     }
 
     db.shutdown();
@@ -366,12 +370,16 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     for n in 1..=writes {
-        db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec())?
+        set_with_flush_if_needed(
+            &db,
+            n.to_be_bytes().to_vec(),
+            n.to_le_bytes().to_vec(),
+        )?;
     }
 
     for n in 1..=writes {
         if n % 2 == 0 {
-            db.delete(n.to_be_bytes().to_vec())?
+            delete_with_flush_if_needed(&db, n.to_be_bytes().to_vec())?
         }
     }
 
@@ -552,12 +560,12 @@ fn overwrite_same_key_multiple_times() -> Result<(), ToyKVError> {
 
     // Overwrite many times -- ensure in sstables
     for i in 0..2500 {
-        db.set("key", format!("value{}", i))?;
+        set_with_flush_if_needed(&db, "key", format!("value{}", i))?;
     }
 
     assert_eq!(db.get("key")?.unwrap(), b"value2499");
     assert_eq!(db.metrics.writes.load(Ordering::Relaxed), 2500);
-    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 2);
+    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 1);
 
     Ok(())
 }
@@ -572,19 +580,33 @@ fn wal_threshold_boundary() -> Result<(), ToyKVError> {
 
     // Write exactly 999 items (one less than threshold)
     for i in 0..999 {
-        db.set(format!("key{}", i), format!("value{}", i))?;
+        set_with_flush_if_needed(
+            &db,
+            format!("key{}", i),
+            format!("value{}", i),
+        )?;
     }
     assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 0);
 
-    // Write the 1000th item - should trigger flush
-    db.set("key999", "value999")?;
-    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 1);
-
-    // Write 1000 more - should trigger another flush
+    // Write more, will fit in frozen_memtable
     for i in 1000..2000 {
-        db.set(format!("key{}", i), format!("value{}", i))?;
+        set_with_flush_if_needed(
+            &db,
+            format!("key{}", i),
+            format!("value{}", i),
+        )?;
     }
-    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 2);
+    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 0);
+
+    // Write 1000 more - should finally trigger a flush
+    for i in 2000..3000 {
+        set_with_flush_if_needed(
+            &db,
+            format!("key{}", i),
+            format!("value{}", i),
+        )?;
+    }
+    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 1);
 
     Ok(())
 }
@@ -613,11 +635,15 @@ fn scan_database_with_only_deleted_items() -> Result<(), ToyKVError> {
 
     // Add some items then delete them all
     for i in 0..2500 {
-        db.set(format!("key{}", i), format!("value{}", i))?;
+        set_with_flush_if_needed(
+            &db,
+            format!("key{}", i),
+            format!("value{}", i),
+        )?;
     }
 
     for i in 0..2500 {
-        db.delete(format!("key{}", i))?;
+        delete_with_flush_if_needed(&db, format!("key{}", i))?;
     }
 
     let mut count = 0;
@@ -646,7 +672,7 @@ fn scan_returns_correct_values() -> Result<(), ToyKVError> {
     }
 
     for i in 0..n_items {
-        db.set(keys[i].clone(), values[i].clone())?;
+        set_with_flush_if_needed(&db, keys[i].clone(), values[i].clone())?;
     }
 
     let mut items: Vec<_> = db
@@ -729,15 +755,21 @@ fn mixed_operations_across_sstable_flushes() -> Result<(), ToyKVError> {
         .open(tmp_dir.path())?;
 
     // First batch - will be in SSTable after flush
-    for i in 0..1000 {
+    for i in 0..2000 {
         db.set(format!("first_{}", i), format!("value_{}", i))?;
     }
-    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 1);
+    assert_eq!(db.metrics.sst_flushes.load(Ordering::Relaxed), 0);
+
+    // Need to flush as 2000 will fill active + frozen memtables
+    db.flush_oldest_memtable()?;
 
     // Delete some from first batch
     for i in 0..500 {
         db.delete(format!("first_{}", i))?;
     }
+
+    // Let's flush the 500 writes that we've got in the frozen memtable.
+    db.flush_oldest_memtable()?;
 
     // Add second batch
     for i in 0..1000 {
@@ -749,7 +781,7 @@ fn mixed_operations_across_sstable_flushes() -> Result<(), ToyKVError> {
     for i in 0..500 {
         assert_eq!(db.get(format!("first_{}", i))?, None); // Deleted
     }
-    for i in 500..1000 {
+    for i in 500..2000 {
         assert_eq!(
             db.get(format!("first_{}", i))?.unwrap(),
             format!("value_{}", i).as_bytes()
@@ -777,6 +809,40 @@ fn nonexistent_data_directory() -> Result<(), ToyKVError> {
     Ok(())
 }
 
+/// Set k to v in db, flushing if needed
+fn set_with_flush_if_needed<S, T>(
+    db: &ToyKV,
+    k: S,
+    v: T,
+) -> Result<(), ToyKVError>
+where
+    S: Into<Vec<u8>> + Clone,
+    T: Into<Vec<u8>> + Clone,
+{
+    match db.set(k.clone(), v.clone()) {
+        Ok(x) => Ok(x),
+        Err(ToyKVError::NeedFlush) => {
+            db.flush_oldest_memtable()?;
+            db.set(k, v)
+        }
+        Err(x) => Err(x),
+    }
+}
+/// Delete k from db, flushing if needed
+fn delete_with_flush_if_needed<K>(db: &ToyKV, k: K) -> Result<(), ToyKVError>
+where
+    K: Into<Vec<u8>> + Clone,
+{
+    match db.delete(k.clone()) {
+        Ok(x) => Ok(x),
+        Err(ToyKVError::NeedFlush) => {
+            db.flush_oldest_memtable()?;
+            db.delete(k)
+        }
+        Err(x) => Err(x),
+    }
+}
+
 #[test]
 fn operations_with_large_batch_across_restart() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
@@ -789,12 +855,16 @@ fn operations_with_large_batch_across_restart() -> Result<(), ToyKVError> {
 
         // Write 5000 items to ensure multiple SSTable flushes
         for i in 0..5000 {
-            db.set(u32::to_be_bytes(i).to_vec(), format!("value_{}", i))?;
+            set_with_flush_if_needed(
+                &db,
+                u32::to_be_bytes(i).to_vec(),
+                format!("value_{}", i),
+            )?;
         }
 
         // Delete every 3rd item
         for i in (0..5000).step_by(3) {
-            db.delete(u32::to_be_bytes(i).to_vec())?;
+            delete_with_flush_if_needed(&db, u32::to_be_bytes(i).to_vec())?;
         }
 
         db.shutdown();
