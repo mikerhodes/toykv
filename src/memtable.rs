@@ -26,6 +26,16 @@ impl Memtable {
         Ok(Self { memtable, wal })
     }
 
+    // An opaque ID for the memtable
+    pub(crate) fn id(&self) -> String {
+        self.wal.wal_path().to_str().unwrap().to_string()
+    }
+
+    // Path to the WAL on disk
+    pub(crate) fn wal_path(&self) -> PathBuf {
+        self.wal.wal_path().clone()
+    }
+
     pub(crate) fn write(
         &mut self,
         k: Vec<u8>,

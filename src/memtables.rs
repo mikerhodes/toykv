@@ -23,7 +23,8 @@ pub(crate) struct Memtables {
     /// frozen_memtable exists to be written to disk
     /// in the background, such that we can still
     /// accept writes to the active memtable.
-    frozen_memtable: Option<Memtable>,
+    frozen_memtables: Vec<Memtable>,
+    max_frozen_memtables: usize,
     wal_write_threshold: u64,
     wal_sync: WALSync,
 }
@@ -52,16 +53,16 @@ impl Memtables {
         // to save the frozen memtable to disk. Mostly the
         // frozen memtable is transient, as it's saved to disk
         // almost immediately.
-        let frozen_memtable = match wal_index.frozen_wal() {
-            None => None,
-            Some(x) => Some(Memtable::new(x, wal_sync)?),
-        };
-
+        let mut frozen_memtables = vec![];
+        for p in wal_index.frozen_wals() {
+            frozen_memtables.push(Memtable::new(p, wal_sync)?);
+        }
         Ok(Memtables {
             d,
             wal_index,
             active_memtable,
-            frozen_memtable,
+            frozen_memtables,
+            max_frozen_memtables: 1,
             wal_write_threshold,
             wal_sync,
         })
@@ -73,18 +74,17 @@ impl Memtables {
     ) -> Result<(), ToyKVError> {
         if self.active_memtable.wal_writes() >= self.wal_write_threshold {
             let new_wal_path = new_wal_path(&self.d);
-            let old_wal_path = self.wal_index.active_wal().unwrap();
-
             self.wal_index.set_active_wal(&new_wal_path)?;
-            self.wal_index.set_frozen_wal(&old_wal_path)?;
-
             let new_active_memtable =
                 Memtable::new(new_wal_path, self.wal_sync)?;
 
-            self.frozen_memtable = Some(mem::replace(
-                &mut self.active_memtable,
-                new_active_memtable,
-            ));
+            let frozen_memtable =
+                mem::replace(&mut self.active_memtable, new_active_memtable);
+
+            self.frozen_memtables.insert(0, frozen_memtable);
+            self.wal_index.set_frozen_wals(
+                self.frozen_memtables.iter().map(|x| x.wal_path()).collect(),
+            )?;
         }
         self.active_memtable.write(k, v)?;
         Ok(())
@@ -92,9 +92,9 @@ impl Memtables {
 
     /// Return true if there is no longer space writes in memtables
     pub(crate) fn needs_flush(&self) -> bool {
-        // No space in active memtable and we have a frozen on already.
+        // No space in active memtable and we already have max_frozen_memtables.
         if self.active_memtable.wal_writes() >= self.wal_write_threshold {
-            self.frozen_memtable.is_some()
+            self.frozen_memtables.len() >= self.max_frozen_memtables
         } else {
             false
         }
@@ -102,34 +102,53 @@ impl Memtables {
 
     /// Return true if there is a non-active memtable available to flush.
     pub(crate) fn can_flush(&self) -> bool {
-        return self.frozen_memtable.is_some();
+        !self.frozen_memtables.is_empty()
     }
 
-    pub(crate) fn write_frozen_memtable(
+    // Write the oldest memtable to disk, returning the result
+    // of the write and the ID for the memtable (to pass to drop_memtable).
+    pub(crate) fn write_oldest_memtable(
         &self,
         w: crate::table::SSTableWriter,
-    ) -> Result<crate::table::SSTableWriterResult, Error> {
-        assert!(self.frozen_memtable.is_some(), "frozen_memtable is None");
-        w.write(self.frozen_memtable.as_ref().unwrap().iter())
+    ) -> Result<(crate::table::SSTableWriterResult, String), Error> {
+        assert!(!self.frozen_memtables.is_empty(), "frozen_memtables empty!");
+        let ft = self.frozen_memtables.last().unwrap();
+        let r = w.write(ft.iter())?;
+        Ok((r, ft.id()))
     }
 
-    pub(crate) fn drop_frozen_memtable(&mut self) -> Result<(), ToyKVError> {
-        self.wal_index.remove_frozen_wal()?;
-        let ft = mem::replace(&mut self.frozen_memtable, None);
-        match ft {
-            Some(mut ft) => ft.cleanup_disk(),
-            None => Ok(()),
-        }
+    pub(crate) fn drop_memtable(
+        &mut self,
+        id: String,
+    ) -> Result<(), ToyKVError> {
+        let idx = self.frozen_memtables.iter().position(|x| x.id() == id);
+
+        let idx = match idx {
+            Some(x) => x,
+            None => return Ok(()), // already gone
+        };
+
+        let mut dropped_table = self.frozen_memtables.remove(idx);
+        self.wal_index.set_frozen_wals(
+            self.frozen_memtables.iter().map(|x| x.wal_path()).collect(),
+        )?;
+        dropped_table.cleanup_disk()?;
+
+        Ok(())
     }
 
     pub(crate) fn get(&self, k: &[u8]) -> Option<KVValue> {
-        match self.active_memtable.get(k) {
-            Some(r) => Some(r),
-            None => match &self.frozen_memtable {
-                None => None,
-                Some(t) => t.get(k),
-            },
+        let r = self.active_memtable.get(k);
+        if let Some(_) = r {
+            return r;
         }
+        for t in self.frozen_memtables.iter() {
+            let r = t.get(k);
+            if let Some(_) = r {
+                return r;
+            }
+        }
+        None
     }
 
     pub(crate) fn iters(
@@ -140,8 +159,8 @@ impl Memtables {
         let mut iters = vec![self
             .active_memtable
             .range(lower_bound.clone(), upper_bound.clone())];
-        if let Some(ft) = &self.frozen_memtable {
-            iters.push(ft.range(lower_bound, upper_bound))
+        for t in self.frozen_memtables.iter() {
+            iters.push(t.range(lower_bound.clone(), upper_bound.clone()))
         }
         iters
     }

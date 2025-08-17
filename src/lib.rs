@@ -1,5 +1,4 @@
 use memtables::Memtables;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::{io::Error, ops::Bound, path::Path};
@@ -37,10 +36,7 @@ pub struct ToyKVMetrics {
 
 pub struct ToyKV {
     /// d is the folder that the KV store owns.
-    d: PathBuf,
     pub metrics: ToyKVMetrics,
-    wal_write_threshold: u64,
-    wal_sync: WALSync,
     state: RwLock<ToyKVState>,
 }
 
@@ -50,6 +46,7 @@ struct ToyKVState {
     /// storage.
     sstables: SSTables,
 
+    /// memtables are the in memory tables
     memtables: Memtables,
 }
 
@@ -108,14 +105,11 @@ impl ToyKVBuilder {
         )?;
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
-            d: d.to_path_buf(),
             state: RwLock::new(ToyKVState {
                 memtables,
                 sstables,
             }),
             metrics: Default::default(),
-            wal_write_threshold: self.options.wal_write_threshold,
-            wal_sync: self.options.wal_sync,
         })
     }
 }
@@ -198,14 +192,14 @@ impl ToyKV {
             // Add vec of frozen tables, so user can tune
             // for the write rate vs. memory used?
             let w = state.sstables.build_sstable_writer();
-            let r = state.memtables.write_frozen_memtable(w)?;
+            let (r, id) = state.memtables.write_oldest_memtable(w)?;
             state
                 .sstables
                 .commit_new_sstable(r)
                 .expect("Error committing new sstable; restart for safety.");
             state
                 .memtables
-                .drop_frozen_memtable()
+                .drop_memtable(id)
                 .expect("Error dropping old memtable; restart for safety.");
             self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }

@@ -161,6 +161,10 @@ impl WAL {
         Ok(())
     }
 
+    pub(crate) fn wal_path(&self) -> PathBuf {
+        self.wal_path.clone()
+    }
+
     /// Delete the WAL file from disk.
     /// Take care; this could result in data loss if the
     /// associated memtable is not written to an sstable.

@@ -8,7 +8,7 @@ use std::{
 #[derive(Serialize, Deserialize)]
 pub(crate) struct WALIndexFile {
     pub(crate) active_wal: Option<PathBuf>,
-    pub(crate) frozen_wal: Option<PathBuf>,
+    pub(crate) frozen_wals: Vec<PathBuf>,
 }
 
 pub(crate) struct WALIndex {
@@ -31,7 +31,7 @@ impl WALIndex {
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 let wif = WALIndexFile {
                     active_wal: None,
-                    frozen_wal: None,
+                    frozen_wals: vec![],
                 };
                 Ok(WALIndex {
                     wal_index_file: wif,
@@ -58,27 +58,18 @@ impl WALIndex {
         }
     }
 
-    pub(crate) fn set_frozen_wal(&mut self, p: &Path) -> Result<(), Error> {
-        self.wal_index_file.frozen_wal = Some(p.to_path_buf());
+    pub(crate) fn set_frozen_wals(
+        &mut self,
+        p: Vec<PathBuf>,
+    ) -> Result<(), Error> {
+        self.wal_index_file.frozen_wals = p;
         fs::write(
             &self.backing_file_path,
             serde_json::to_string(&self.wal_index_file)?,
         )
     }
 
-    pub(crate) fn frozen_wal(&self) -> Option<PathBuf> {
-        match &self.wal_index_file.frozen_wal {
-            None => None,
-            Some(x) => Some(x.clone()),
-        }
-    }
-
-    /// Remove the frozen WAL from the index
-    pub(crate) fn remove_frozen_wal(&mut self) -> Result<(), Error> {
-        self.wal_index_file.frozen_wal = None;
-        fs::write(
-            &self.backing_file_path,
-            serde_json::to_string(&self.wal_index_file)?,
-        )
+    pub(crate) fn frozen_wals(&self) -> Vec<PathBuf> {
+        self.wal_index_file.frozen_wals.clone()
     }
 }
