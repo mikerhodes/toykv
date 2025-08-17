@@ -1,6 +1,5 @@
 // Implements a simple WAL for the database's memtable.
 
-use crossbeam_skiplist::SkipMap;
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Error, Read, Seek, Write},
@@ -9,6 +8,7 @@ use std::{
 
 use crate::{
     kvrecord::{KVRecord, KVValue, KVWriteRecord},
+    memtable::MemtableMap,
     ToyKVError, WALSync,
 };
 
@@ -69,12 +69,11 @@ impl WAL {
     /// Replays the WAL into a memtable. Call this first.
     pub(crate) fn replay(
         &mut self,
-    ) -> Result<SkipMap<Vec<u8>, KVValue>, ToyKVError> {
+        memtable: &mut MemtableMap,
+    ) -> Result<(), ToyKVError> {
         if self.f.is_some() {
             return Err(ToyKVError::BadWALState);
         }
-
-        let memtable = SkipMap::new();
 
         let file = match OpenOptions::new()
             .read(true)
@@ -92,7 +91,7 @@ impl WAL {
         if size == 0 {
             // New WAL file, nothing to replay
             self.f = Some(file);
-            return Ok(memtable);
+            return Ok(());
         }
 
         // 256k buffer covers at least one max size record.
@@ -113,7 +112,7 @@ impl WAL {
                         });
                     }
                     assert_eq!(wr.op, OP_SET, "Unexpected op code");
-                    memtable.insert(wr.key, wr.value);
+                    memtable.write(wr.key, wr.value);
                     last_read_seq = wr.seq;
                     self.nextseq = wr.seq + 1;
                     self.wal_writes += 1;
@@ -130,7 +129,7 @@ impl WAL {
 
         self.f = Some(file);
 
-        Ok(memtable)
+        Ok(())
     }
 
     /// Appends entry to WAL

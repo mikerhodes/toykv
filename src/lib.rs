@@ -53,7 +53,7 @@ struct ToyKVState {
 struct ToyKVOptions {
     wal_sync: WALSync,
     wal_write_threshold: u64,
-    // max_sstable_size: u64,
+    max_sstable_size_bytes: u64,
 }
 
 pub struct ToyKVBuilder {
@@ -65,7 +65,7 @@ impl Default for ToyKVOptions {
         Self {
             wal_sync: WALSync::Full,
             wal_write_threshold: 250_000, // At 1kb kv pairs, 256MB
-                                          // max_sstable_size: 16 * 1024 * 1024,
+            max_sstable_size_bytes: 256 * 1024 * 1024, // bytes
         }
     }
 }
@@ -102,6 +102,7 @@ impl ToyKVBuilder {
             d.to_path_buf(),
             self.options.wal_sync,
             self.options.wal_write_threshold,
+            self.options.max_sstable_size_bytes,
         )?;
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
