@@ -151,6 +151,7 @@ pub(crate) struct TableIterator {
     // current block
     bi: BlockIterator,
     b_idx: usize,
+    upper_bound: Bound<Vec<u8>>,
 }
 
 impl TableIterator {
@@ -166,23 +167,27 @@ impl TableIterator {
             tr,
             bi: BlockIterator::create(first_block),
             b_idx: 0,
+            upper_bound: Bound::Unbounded,
         })
     }
 
     pub(crate) fn new_with_tablereader(
         tr: Arc<TableReader>,
+        upper_bound: Bound<Vec<u8>>,
     ) -> Result<TableIterator, Error> {
         let first_block = tr.load_block(&tr.bm[0])?;
         Ok(TableIterator {
             tr,
             bi: BlockIterator::create(first_block),
             b_idx: 0,
+            upper_bound,
         })
     }
 
     pub(crate) fn new_seeked_with_tablereader(
         tr: Arc<TableReader>,
         key: &[u8],
+        upper_bound: Bound<Vec<u8>>,
     ) -> Result<TableIterator, Error> {
         let seeked_block_idx = TableIterator::seek_to_key_int(&tr.bm, key)?;
         // position tableiterator at selected block
@@ -194,6 +199,7 @@ impl TableIterator {
             tr,
             bi,
             b_idx: seeked_block_idx,
+            upper_bound,
         })
     }
 
@@ -312,8 +318,19 @@ impl Iterator for TableIterator {
         loop {
             let next_record = self.bi.next();
 
-            if let Some(x) = next_record {
-                return Some(Ok(x));
+            if let Some(kvrecord) = next_record {
+                // Check end key
+                match &self.upper_bound {
+                    Bound::Included(x) if kvrecord.key > *x => {
+                        return None;
+                    }
+                    Bound::Excluded(x) if kvrecord.key >= *x => {
+                        return None;
+                    }
+                    _ => (),
+                };
+
+                return Some(Ok(kvrecord));
             }
 
             let new_block = self.load_next_block();

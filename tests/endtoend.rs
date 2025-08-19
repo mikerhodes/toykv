@@ -359,6 +359,57 @@ fn scan_on_reopen() -> Result<(), ToyKVError> {
 }
 
 #[test]
+fn scan_with_upper_bound() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    let writes = 2500i64;
+
+    {
+        let mut db = ToyKVBuilder::new()
+            .wal_sync(WALSync::Off)
+            .wal_write_threshold(1000)
+            .open(tmp_dir.path())?;
+
+        for n in 1..(writes + 1) {
+            set_with_flush_if_needed(
+                &db,
+                n.to_be_bytes().to_vec(),
+                n.to_le_bytes().to_vec(),
+            )?;
+        }
+        db.shutdown();
+    }
+
+    {
+        let db = toykv::open(tmp_dir.path())?;
+        let i2v = |x: i64| (x as i64).to_be_bytes().to_vec();
+        let check = |sk: i64, ub: Bound<Vec<u8>>, expected: usize| {
+            assert_eq!(
+                db.scan(Some(sk.to_be_bytes().as_slice()), ub)
+                    .unwrap()
+                    .count(),
+                expected
+            );
+        };
+
+        // First, fully unbounded scan
+        let mut cnt = 0;
+        for _ in db.scan(None, Bound::Unbounded)? {
+            cnt += 1;
+        }
+        assert_eq!(cnt, writes);
+
+        // Now various upper bounds
+        check(500, Bound::Included(i2v(510)), 11);
+        check(500, Bound::Excluded(i2v(510)), 10);
+        check(500, Bound::Excluded(i2v(3000)), writes as usize - 499);
+        check(500, Bound::Excluded(i2v(499)), 0);
+    }
+
+    Ok(())
+}
+
+#[test]
 fn scan_with_deletes() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 

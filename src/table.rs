@@ -9,6 +9,7 @@
 use std::{
     io::{Cursor, Error, Read},
     iter::repeat_with,
+    ops::Bound,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -117,8 +118,9 @@ impl SSTables {
     pub(crate) fn iters(
         &self,
         k: Option<&[u8]>,
+        upper_bound: Bound<Vec<u8>>,
     ) -> Result<Vec<TableIterator>, Error> {
-        self.sstables.iters(k)
+        self.sstables.iters(k, upper_bound)
     }
 }
 /// Iterate entries in an on-disk SSTable.
@@ -166,9 +168,11 @@ impl SSTablesReader {
         {
             // dbg!("t in tables");
             // tables_searched += 1;
-            let mut t =
-                TableIterator::new_seeked_with_tablereader(tr.clone(), k)?;
-            // t.seek_to_key(k)?;
+            let mut t = TableIterator::new_seeked_with_tablereader(
+                tr.clone(),
+                k,
+                Bound::Unbounded,
+            )?;
             match t.next() {
                 Some(Ok(v)) if v.key == k => {
                     // dbg!(tables_searched);
@@ -182,14 +186,23 @@ impl SSTablesReader {
         Ok(None)
     }
 
-    fn iters(&self, k: Option<&[u8]>) -> Result<Vec<TableIterator>, Error> {
+    fn iters(
+        &self,
+        k: Option<&[u8]>,
+        upper_bound: Bound<Vec<u8>>,
+    ) -> Result<Vec<TableIterator>, Error> {
         let mut vec = vec![];
         for tr in &self.tablereaders {
             let t = match k {
-                Some(k) => {
-                    TableIterator::new_seeked_with_tablereader(tr.clone(), k)?
-                }
-                None => TableIterator::new_with_tablereader(tr.clone())?,
+                Some(k) => TableIterator::new_seeked_with_tablereader(
+                    tr.clone(),
+                    k,
+                    upper_bound.clone(),
+                )?,
+                None => TableIterator::new_with_tablereader(
+                    tr.clone(),
+                    upper_bound.clone(),
+                )?,
             };
             vec.push(t);
         }
