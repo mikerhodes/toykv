@@ -14,7 +14,6 @@ pub mod error;
 mod kvrecord;
 mod memtable;
 mod memtables;
-mod merge_iterator;
 mod merge_iterator2;
 mod table;
 mod wal;
@@ -261,10 +260,10 @@ impl ToyKV {
 
         let state = self.state.read().unwrap();
         let mt_iters = state.memtables.iters(lower_bound, upper_bound.clone());
-        let sst_iters = state.sstables.iters(start_key)?;
+        let sst_iters = state.sstables.iters(start_key, upper_bound.clone())?;
         drop(state);
 
-        let mut m = MergeIterator::<'a>::new(upper_bound.clone());
+        let mut m = MergeIterator::<'a>::new();
         for t in mt_iters.into_iter() {
             m.add_iterator(t);
         }
