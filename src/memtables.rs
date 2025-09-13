@@ -1,5 +1,4 @@
 use std::{
-    io::Error,
     iter::repeat_with,
     mem,
     path::{Path, PathBuf},
@@ -9,7 +8,8 @@ use memtable::Memtable;
 use walindex::WALIndex;
 
 use crate::{
-    error::ToyKVError, kvrecord::KVValue, memtable, walindex, WALSync,
+    error::ToyKVError, kvrecord::KVValue, memtable,
+    merge_iterator2::MergeIterator, walindex, WALSync,
 };
 
 pub(crate) struct Memtables {
@@ -120,10 +120,12 @@ impl Memtables {
     pub(crate) fn write_oldest_memtable(
         &self,
         w: crate::table::SSTableWriter,
-    ) -> Result<(crate::table::SSTableWriterResult, String), Error> {
+    ) -> Result<(crate::table::SSTableWriterResult, String), ToyKVError> {
         assert!(!self.frozen_memtables.is_empty(), "frozen_memtables empty!");
         let ft = self.frozen_memtables.last().unwrap();
-        let r = w.write(ft.iter())?;
+        let mut mt = MergeIterator::new();
+        mt.add_iterator(ft.iter());
+        let r = w.write(ft.len(), mt)?;
         Ok((r, ft.id()))
     }
 

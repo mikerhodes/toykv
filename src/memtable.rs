@@ -71,6 +71,10 @@ impl Memtable {
         self.wal.wal_path().to_str().unwrap().to_string()
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.memtable.map.len()
+    }
+
     // Path to the WAL on disk
     pub(crate) fn wal_path(&self) -> PathBuf {
         self.wal.wal_path().clone()
@@ -158,10 +162,6 @@ pub(crate) struct MemtableIterator {
 }
 
 impl MemtableIterator {
-    pub(crate) fn len(&self) -> usize {
-        self.borrow_memtable().len()
-    }
-
     fn entry_to_kvrecord(
         entry: Entry<Vec<u8>, KVValue>,
     ) -> Result<KVRecord, Error> {
@@ -241,7 +241,7 @@ mod tests {
         write_kv(&mut memtable, b"key", 15); // same value
         assert_eq!(memtable.estimated_size_bytes(), 18);
 
-        write_kv(&mut memtable, b"key", 1800); 
+        write_kv(&mut memtable, b"key", 1800);
         assert_eq!(memtable.estimated_size_bytes(), 1803);
 
         delete_kv(&mut memtable, b"key");

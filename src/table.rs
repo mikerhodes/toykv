@@ -7,7 +7,7 @@
 // --------------------------------------------------------------------------
 
 use std::{
-    io::{Cursor, Error, ErrorKind, Read},
+    io::{Cursor, Error, Read},
     iter::repeat_with,
     ops::Bound,
     path::{Path, PathBuf},
@@ -17,7 +17,7 @@ use std::{
 const BLOOM_HASH_KEY: &[u8; 16] =
     &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
-use crate::{memtable::MemtableIterator, merge_iterator2::MergeIterator};
+use crate::{error::ToyKVError, merge_iterator2::MergeIterator};
 use builder::TableBuilder;
 use iterator::{TableIterator, TableReader};
 use siphasher::sip::SipHasher13;
@@ -44,11 +44,33 @@ impl SSTableWriter {
     /// pass to SSTables::commit.
     pub(crate) fn write(
         self,
-        memtable_iterator: MemtableIterator,
-    ) -> Result<SSTableWriterResult, Error> {
+        expected_n_keys: usize,
+        memtable_iterator: MergeIterator,
+    ) -> Result<SSTableWriterResult, ToyKVError> {
+        // The BloomFilter I'm using wants to know the bits_per_key
+        // and the len, it uses that to calculate the number of
+        // buckets to use --- I can see Pebble's bloom filter instead
+        // just expands the number of buckets as it goes rather
+        // than needing the number in advance. But I can't see a
+        // rust one that operates in the same way. We will have to
+        // guess a good value.
+        // Claude says that bloomfilters can vary from 10KB to several
+        // MB in size. A 256MB file full of 1KB items would contain
+        // 262144 items, which * 10 bytes for about 1% FP rate gives
+        // us 256*1024*10/8/1024 => 320KB. So we can easily assume
+        // 500byte kv pairs for about 640k. That's okay. We can
+        // use that as our guesstimate once we are using 256MB
+        // files. Probably the writer is going to have to assume
+        // that size for the compact, but for memtables we can
+        // still use the size of the memtable.
+        // To make the 256MB files, the writer will have to keep
+        // track of the length of k/v items as they are written.
+        // I don't think there's a size as yet. Looks like we
+        // should use the lower-level TableWriter to do this,
+        // rather than using this memtable writer wrapper.
         // 256MB -> 1KB per item -> 262,144 items.
-        let mut sst =
-            TableBuilder::new(self.bloom_hasher, memtable_iterator.len());
+        // 256MB -> 500 byte per item -> 524,288 items.
+        let mut sst = TableBuilder::new(self.bloom_hasher, expected_n_keys);
         for entry in memtable_iterator {
             let record = entry?;
             assert!(sst.add(&record.key[..], &record.value).is_ok());
@@ -110,61 +132,52 @@ impl SSTables {
         Ok(())
     }
 
-    // Compact all the l0 iters into a single l0 sstable
-    // This is a step towards better compaction.
-    // TODO in order to safely remove the older files from
-    // the l0 sstables index, we need to ensure that we
-    // either return the list of files we compacted or
-    // that we pass in the list of files to compact. Otherwise,
-    // a new L0 sstable could be written while we compact,
-    // and if we just replace the whole list of sstables
-    // with the new one, we could delete that new sstable
-    // from the index too.
-    pub(crate) fn compact_l0(&self) -> Result<SSTableWriterResult, Error> {
-        let w = SSTableWriter {
-            fname: next_sstable_fname(self.d.as_path()),
-            bloom_hasher: self.bloom_hasher,
-        };
-
-        let iters = self.iters(None, Bound::Unbounded).unwrap();
-
+    /// Compact all the l0 iters into a single l0 sstable
+    /// This is a step towards better compaction.
+    /// For now, compact into one large L0 file.
+    /// Needs to be done in the write lock as we can't change
+    /// the list of files at L0 during compaction.
+    pub(crate) fn compact_l0_v1(
+        &self,
+    ) -> Result<SSTableWriterResult, ToyKVError> {
+        let iters = self.iters(None, Bound::Unbounded)?;
         let mut mi = MergeIterator::new();
         for iter in iters {
             mi.add_iterator(iter)
         }
+        let w = SSTableWriter {
+            fname: next_sstable_fname(self.d.as_path()),
+            bloom_hasher: self.bloom_hasher,
+        };
+        // we don't know this for now --- might have to
+        // get the user to configure the expected size
+        // of a k/v. Used for bloomfilter size.
+        let expected_n_keys = 1000;
+        w.write(expected_n_keys, mi)
+    }
 
-        // TODO we have to update write (or create a new method)
-        // that takes the merge iterator. The thing that is a pain
-        // is that write uses the iterator length, which the merge
-        // iterator cannot easily get (yet) --- we might want to
-        // put the length into the sstable metadata so we can
-        // quickly get the length in the merge iterator.
-        // Actually no --- we shouldn't use the len in write,
-        // because if we are writing 256MB sstables into our
-        // sorted run later, then we won't know the length up
-        // front.
-        // The BloomFilter I'm using wants to know the bits_per_key
-        // and the len, it uses that to calculate the number of
-        // buckets to use --- I can see Pebble's bloom filter instead
-        // just expands the number of buckets as it goes rather
-        // than needing the number in advance. But I can't see a
-        // rust one that operates in the same way. We will have to
-        // guess a good value.
-        // Claude says that bloomfilters can vary from 10KB to several
-        // MB in size. A 256MB file full of 1KB items would contain
-        // 262144 items, which * 10 bytes for about 1% FP rate gives
-        // us 256*1024*10/8/1024 => 320KB. So we can easily assume
-        // 500byte kv pairs for about 640k. That's okay. We can
-        // use that as our guesstimate once we are using 256MB
-        // files. Probably the writer is going to have to assume
-        // that size for the compact, but for memtables we can
-        // still use the size of the memtable.
-        // To make the 256MB files, the writer will have to keep
-        // track of the length of k/v items as they are written.
-        // I don't think there's a size as yet. Looks like we
-        // should use the lower-level TableWriter to do this,
-        // rather than using this memtable writer wrapper.
-        w.write(mi)
+    /// Replace the whole set of L0 tables with the single
+    /// table in w. Nb, this must be called in a critical
+    /// section with compact_l0_v1 because otherwise we
+    /// could replace a newly committed sstable and lose
+    /// data (because we clear the whole list without any
+    /// safety checking).
+    pub(crate) fn commit_compacted_table_v1(
+        &mut self,
+        w: SSTableWriterResult,
+    ) -> Result<(), ToyKVError> {
+        // Commit the new sstable to the index.
+        self.sstables_index.levels.l0.clear();
+        self.sstables_index.levels.l0.push(w.fname);
+        self.sstables_index.write()?;
+
+        // Load new SSTablesReader for the new state.
+        self.sstables = SSTablesReader::new(
+            self.sstables_index.levels.l0.clone(),
+            self.bloom_hasher,
+        )?;
+
+        Ok(())
     }
 
     /// Retrieve the latest value for `k` in the on disk
@@ -179,6 +192,19 @@ impl SSTables {
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<Vec<TableIterator>, Error> {
         self.sstables.iters(k, upper_bound)
+    }
+
+    /// Number of in-use sstables
+    /// Other sstable files may exist in the data
+    /// directory, but they are unused.
+    pub(crate) fn len(&self) -> usize {
+        // This should always be true so validate before we
+        // return the len.
+        assert!(
+            self.sstables_index.levels.l0.len()
+                == self.sstables.tablereaders.len()
+        );
+        self.sstables.tablereaders.len()
     }
 }
 /// Iterate entries in an on-disk SSTable.

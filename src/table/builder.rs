@@ -45,6 +45,7 @@ impl TableBuilder {
         // For a 1% false positive, 10.5 bits per insert
         // Blocks => expected * 10.5 / 256
         // https://github.com/apache/parquet-format/blob/master/BloomFilter.md#sizing-an-sbbf
+        let start = Instant::now();
         let blocks = (expected_writes as f64 * 10.5 / 256f64) as usize;
         let bloom = Filter::new(blocks, expected_writes);
         TableBuilder {
@@ -53,7 +54,7 @@ impl TableBuilder {
             last_key: None,
             data: vec![],
             metadata: vec![],
-            start: Instant::now(),
+            start,
             bloom,
             hasher,
         }

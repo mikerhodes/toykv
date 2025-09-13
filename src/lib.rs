@@ -31,6 +31,7 @@ pub struct ToyKVMetrics {
     pub reads: AtomicU64,
     pub writes: AtomicU64,
     pub deletes: AtomicU64,
+    pub compacts: AtomicU64,
 }
 
 pub struct ToyKV {
@@ -204,6 +205,30 @@ impl ToyKV {
             self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    // Attempt to run a compaction on the stored data. The exact
+    // compaction carried out is opaque to the caller.
+    pub fn compact(&mut self) -> Result<(), ToyKVError> {
+        // v1 compaction just compacts all existing sstables
+        // in L0 into a single L0 table.
+        let mut state = self.state.write().unwrap();
+
+        // These are split such that we can later do the
+        // compact itself outside the lock.
+        let w = state.sstables.compact_l0_v1()?;
+        let r = state.sstables.commit_compacted_table_v1(w);
+
+        self.metrics.compacts.fetch_add(1, Ordering::Relaxed);
+
+        r
+    }
+
+    /// Retrieve the number of live sstables (ie, those in use, not
+    /// awaiting GC).
+    pub fn live_sstables(&self) -> usize {
+        let state = self.state.read().unwrap();
+        state.sstables.len()
     }
 
     /// Get the value for k.
