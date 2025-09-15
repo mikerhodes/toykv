@@ -203,6 +203,11 @@ impl TableIterator {
         })
     }
 
+    /// Get the path to the underlying file for this TableIterator.
+    pub(crate) fn table_path(&self) -> PathBuf {
+        self.tr.p.clone()
+    }
+
     pub(crate) fn might_contain_hashed_key(&self, hash: u64) -> bool {
         self.tr.might_contain_hashed_key(hash)
     }

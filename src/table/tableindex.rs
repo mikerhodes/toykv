@@ -45,10 +45,20 @@ impl SSTableIndex {
     /// Prepends a file to the index at a given level, and writes
     /// the index to disk.
     pub(crate) fn write(&mut self) -> Result<(), Error> {
-        fs::write(
-            &self.backing_file_path,
-            serde_json::to_string(&self.levels)?,
-        )
+        // Create a backup of the file
+        if self.backing_file_path.exists() {
+            // TODO instead check the error of fs:copy for NotFound
+            // to avoid race conditions.
+            let mut backup_path = self.backing_file_path.clone();
+            backup_path.set_extension("bak");
+            fs::copy(&self.backing_file_path, &backup_path)?;
+        }
+
+        // Atomically write new file
+        let mut tmp_path = self.backing_file_path.clone();
+        tmp_path.set_extension("tmpnew");
+        fs::write(&tmp_path, serde_json::to_string(&self.levels)?)?;
+        fs::rename(&tmp_path, &self.backing_file_path)
     }
 }
 

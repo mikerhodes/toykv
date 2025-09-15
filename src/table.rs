@@ -17,7 +17,11 @@ use std::{
 const BLOOM_HASH_KEY: &[u8; 16] =
     &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
-use crate::{error::ToyKVError, merge_iterator2::MergeIterator};
+use crate::{
+    compaction::{CompactionPolicy, CompactionTask, CompactionTaskResult},
+    error::ToyKVError,
+    merge_iterator2::MergeIterator,
+};
 use builder::TableBuilder;
 use iterator::{TableIterator, TableReader};
 use siphasher::sip::SipHasher13;
@@ -30,13 +34,13 @@ pub mod iterator;
 mod tableindex;
 
 pub(crate) struct SSTableWriter {
-    fname: PathBuf,
-    bloom_hasher: SipHasher13,
+    pub(crate) fname: PathBuf,
+    pub(crate) bloom_hasher: SipHasher13,
 }
 
 #[derive(Debug)]
 pub(crate) struct SSTableWriterResult {
-    fname: PathBuf,
+    pub(crate) fname: PathBuf,
 }
 
 impl SSTableWriter {
@@ -106,11 +110,22 @@ impl SSTables {
             bloom_hasher: hasher,
         })
     }
+
+    /// Get the path to the directory storing LSM files.
+    pub(crate) fn store_directory(&self) -> PathBuf {
+        self.d.clone()
+    }
+
+    /// Get the hasher to use when writing sstables.
+    pub(crate) fn bloom_hasher(&self) -> SipHasher13 {
+        self.bloom_hasher
+    }
+
     /// Build a single-use sstable writer. Use to write
     /// a single memtable using the `write` method.
     pub(crate) fn build_sstable_writer(&self) -> SSTableWriter {
         SSTableWriter {
-            fname: next_sstable_fname(self.d.as_path()),
+            fname: SSTables::next_sstable_fname(self.d.as_path()),
             bloom_hasher: self.bloom_hasher,
         }
     }
@@ -132,43 +147,43 @@ impl SSTables {
         Ok(())
     }
 
-    /// Compact all the l0 iters into a single l0 sstable
-    /// This is a step towards better compaction.
-    /// For now, compact into one large L0 file.
-    /// Needs to be done in the write lock as we can't change
-    /// the list of files at L0 during compaction.
-    pub(crate) fn compact_l0_v1(
+    /// Build a single-use sstable compactor. Use to compact
+    /// a set of memtables using compact_v2 method.
+    pub(crate) fn build_compaction_task_v2(
         &self,
-    ) -> Result<SSTableWriterResult, ToyKVError> {
-        let iters = self.iters(None, Bound::Unbounded)?;
-        let mut mi = MergeIterator::new();
-        for iter in iters {
-            mi.add_iterator(iter)
-        }
-        let w = SSTableWriter {
-            fname: next_sstable_fname(self.d.as_path()),
-            bloom_hasher: self.bloom_hasher,
-        };
-        // we don't know this for now --- might have to
-        // get the user to configure the expected size
-        // of a k/v. Used for bloomfilter size.
-        let expected_n_keys = 1000;
-        w.write(expected_n_keys, mi)
+        policy: impl CompactionPolicy,
+    ) -> Result<CompactionTask, ToyKVError> {
+        policy.build_task(&self)
     }
 
-    /// Replace the whole set of L0 tables with the single
-    /// table in w. Nb, this must be called in a critical
-    /// section with compact_l0_v1 because otherwise we
-    /// could replace a newly committed sstable and lose
-    /// data (because we clear the whole list without any
-    /// safety checking).
-    pub(crate) fn commit_compacted_table_v1(
+    /// Try to commit a new l0, replacing the set of
+    /// paths in c_paths (which must be the tail of l0)
+    /// with the path in c_result.
+    /// Will fail if c_paths is not the tail of current l0.
+    /// If this happens, the compaction is void and should
+    /// be retried. GC will clean up the failed compaction
+    /// path (TODO).
+    pub(crate) fn try_commit_compaction_v2(
         &mut self,
-        w: SSTableWriterResult,
+        c_result: CompactionTaskResult,
     ) -> Result<(), ToyKVError> {
-        // Commit the new sstable to the index.
-        self.sstables_index.levels.l0.clear();
-        self.sstables_index.levels.l0.push(w.fname);
+        let c_inputs = c_result.inputs;
+        let c_output = c_result.output;
+
+        // If c_paths is not the tail of l0, then some
+        // other compaction or unexpected change has
+        // happened to l0 after the compact started.
+        // This is bad, fail the commit.
+        if !self.is_tail(&self.sstables_index.levels.l0, &c_inputs) {
+            return Err(ToyKVError::CompactionCommitFailure(
+                "Compacted paths not tail of existing l0".to_string(),
+            ));
+        }
+
+        // Replace the compacted sstables with the new compacted sstable.
+        let t_len = self.sstables_index.levels.l0.len() - c_inputs.len();
+        self.sstables_index.levels.l0.truncate(t_len);
+        self.sstables_index.levels.l0.push(c_output);
         self.sstables_index.write()?;
 
         // Load new SSTablesReader for the new state.
@@ -206,7 +221,23 @@ impl SSTables {
         );
         self.sstables.tablereaders.len()
     }
+
+    /// Return a new sstable path, contained in dir
+    pub(crate) fn next_sstable_fname(dir: &Path) -> PathBuf {
+        let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
+        dir.join(format!("{}.sstable", s))
+    }
+
+    /// Return whether candidate_tail is the tail of v.
+    fn is_tail<T: PartialEq>(&self, v: &[T], candidate_tail: &[T]) -> bool {
+        if candidate_tail.len() > v.len() {
+            return false;
+        }
+        let potential_tail = &v[v.len() - candidate_tail.len()..];
+        potential_tail == candidate_tail
+    }
 }
+
 /// Iterate entries in an on-disk SSTable.
 struct SSTablesReader {
     /// tables maintains a set of BufReaders on every sstable
@@ -294,11 +325,6 @@ impl SSTablesReader {
     }
 }
 
-fn next_sstable_fname(dir: &Path) -> PathBuf {
-    let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
-    dir.join(format!("{}.sstable", s))
-}
-
 #[derive(Debug)]
 pub(crate) struct BlockMeta {
     pub(crate) start_offset: u32,
@@ -351,6 +377,21 @@ impl BlockMeta {
             first_key,
             last_key,
         }
+    }
+}
+
+/// Utility Trait to gather the paths for TableIterators
+pub(crate) trait TableIteratorPaths {
+    /// Retrieve the paths on disk for the TableIterators
+    fn table_paths(&self) -> Vec<PathBuf>;
+}
+
+/// Implement TableIteratorPaths for Vec<TableIterator>
+impl TableIteratorPaths for Vec<TableIterator> {
+    fn table_paths(&self) -> Vec<PathBuf> {
+        self.iter()
+            .map(|e| e.table_path())
+            .collect::<Vec<PathBuf>>()
     }
 }
 

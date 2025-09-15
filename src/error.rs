@@ -12,6 +12,8 @@ pub enum ToyKVError {
     DatabaseShutdown,
     // memtables are full and a flush is needed
     NeedFlush,
+    CompactionCommitFailure(String),
+    CompactionAlreadyRunning,
 }
 
 impl From<&std::io::Error> for ToyKVError {

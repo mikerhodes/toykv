@@ -1,6 +1,7 @@
+use compaction::SimpleCompactionPolicy;
 use memtables::Memtables;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::{io::Error, ops::Bound, path::Path};
 
 use error::ToyKVError;
@@ -10,6 +11,7 @@ use table::SSTables;
 
 mod block;
 mod blockiterator;
+mod compaction;
 pub mod error;
 mod kvrecord;
 mod memtable;
@@ -37,7 +39,7 @@ pub struct ToyKVMetrics {
 pub struct ToyKV {
     /// d is the folder that the KV store owns.
     pub metrics: ToyKVMetrics,
-    state: RwLock<ToyKVState>,
+    state: Arc<RwLock<ToyKVState>>,
 }
 
 /// ToyKVState is the modifiable state of the database.
@@ -48,6 +50,10 @@ struct ToyKVState {
 
     /// memtables are the in memory tables
     memtables: Memtables,
+
+    /// Protect against running more than one
+    /// compaction from different threads.
+    compacting: bool,
 }
 
 struct ToyKVOptions {
@@ -106,10 +112,11 @@ impl ToyKVBuilder {
         )?;
         let sstables = table::SSTables::new(d)?;
         Ok(ToyKV {
-            state: RwLock::new(ToyKVState {
+            state: Arc::new(RwLock::new(ToyKVState {
                 memtables,
                 sstables,
-            }),
+                compacting: false,
+            })),
             metrics: Default::default(),
         })
     }
@@ -184,6 +191,8 @@ impl ToyKV {
     /// Periodically call this from a background thread,
     /// or when set or delete is rejected with ToyKVError::NeedFlush.
     pub fn flush_oldest_memtable(&self) -> Result<(), ToyKVError> {
+        // TODO copy pattern from compact to allow the write out of
+        // the memtable to be done outside the locks.
         let mut state = self.state.write().unwrap();
         if state.memtables.can_flush() {
             // TODO
@@ -210,18 +219,32 @@ impl ToyKV {
     // Attempt to run a compaction on the stored data. The exact
     // compaction carried out is opaque to the caller.
     pub fn compact(&mut self) -> Result<(), ToyKVError> {
-        // v1 compaction just compacts all existing sstables
-        // in L0 into a single L0 table.
-        let mut state = self.state.write().unwrap();
+        // v2 compaction just compacts all existing sstables
+        // in L0 into a single L0 table. This is implemented
+        // with SimpleCompactionPolicy.
+        let policy = SimpleCompactionPolicy::new();
 
-        // These are split such that we can later do the
-        // compact itself outside the lock.
-        let w = state.sstables.compact_l0_v1()?;
-        let r = state.sstables.commit_compacted_table_v1(w);
+        // Guard ensures only one compaction can happen at a time.
+        let _guard = CompactionGuard::acquire(self.state.clone())?;
+
+        // Get a table compaction task from the sstables structure.
+        let c_task = {
+            let state = self.state.read().unwrap();
+            state.sstables.build_compaction_task_v2(policy)?
+        };
+
+        // Compaction task is safe to run outside state lock
+        let c_result = c_task.compact_v2()?;
+
+        // Commit the compacted table while holding write lock.
+        {
+            let mut state = self.state.write().unwrap();
+            state.sstables.try_commit_compaction_v2(c_result)?;
+        }
 
         self.metrics.compacts.fetch_add(1, Ordering::Relaxed);
 
-        r
+        Ok(())
     }
 
     /// Retrieve the number of live sstables (ie, those in use, not
@@ -329,5 +352,49 @@ impl<'a> Iterator for KVIterator<'a> {
                 },
             }
         }
+    }
+}
+
+/// CompactionGuard uses the compacting flag on state to ensure
+/// only one compaction can happen at a time. Dropping the
+/// guard allows a new compaction to start.
+struct CompactionGuard {
+    state: Arc<RwLock<ToyKVState>>,
+    active: bool,
+}
+
+impl CompactionGuard {
+    /// If returns Ok, compaction can go ahead. Otherwise, there
+    /// is an already ongoing compaction.
+    fn acquire(state: Arc<RwLock<ToyKVState>>) -> Result<Self, ToyKVError> {
+        // Test and set compacting flag while locked
+        {
+            let mut s = state.write().unwrap();
+            if s.compacting {
+                return Err(ToyKVError::CompactionAlreadyRunning);
+            }
+            s.compacting = true;
+        }
+
+        Ok(CompactionGuard {
+            state,
+            active: true,
+        })
+    }
+
+    // Allow early release
+    fn release(&mut self) {
+        if self.active {
+            if let Ok(mut state) = self.state.write() {
+                state.compacting = false;
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for CompactionGuard {
+    fn drop(&mut self) {
+        self.release();
     }
 }
