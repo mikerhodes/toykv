@@ -145,8 +145,8 @@ impl CompactionTask {
         write_result.map(|write_result| CompactionTaskResult {
             input_plan: self.input_plan,
             output_plan: CompactionPlan {
-                l1: vec![],
-                l0: vec![write_result.fname],
+                l0: vec![],
+                l1: vec![write_result.fname],
             },
         })
     }

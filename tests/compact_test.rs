@@ -3,7 +3,7 @@ use std::{fs, io, sync::atomic::Ordering};
 use toykv::{error::ToyKVError, ToyKV, ToyKVBuilder, WALSync};
 
 #[test]
-fn compact_saity_ckeck() -> Result<(), ToyKVError> {
+fn compact_sanity_check() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
     // expected sstables after first write, before compaction

@@ -100,9 +100,8 @@ impl SSTables {
     pub(crate) fn new(d: &Path) -> Result<SSTables, Error> {
         let index_path = d.join("sstable_index.json");
         let sstables_index = SSTableIndex::open(index_path)?;
-        let files = sstables_index.levels.l0.clone();
         let hasher = SipHasher13::new_with_key(BLOOM_HASH_KEY);
-        let sstables = SSTablesReader::new(files, hasher)?;
+        let sstables = SSTablesReader::new(&sstables_index, hasher)?;
         Ok(SSTables {
             d: d.to_path_buf(),
             sstables_index,
@@ -139,10 +138,8 @@ impl SSTables {
         self.sstables_index.write()?;
 
         // Load new SSTablesReader for the new state.
-        self.sstables = SSTablesReader::new(
-            self.sstables_index.levels.l0.clone(),
-            self.bloom_hasher,
-        )?;
+        self.sstables =
+            SSTablesReader::new(&self.sstables_index, self.bloom_hasher)?;
 
         Ok(())
     }
@@ -198,10 +195,8 @@ impl SSTables {
         self.sstables_index.write()?;
 
         // Load new SSTablesReader for the new state.
-        self.sstables = SSTablesReader::new(
-            self.sstables_index.levels.l0.clone(),
-            self.bloom_hasher,
-        )?;
+        self.sstables =
+            SSTablesReader::new(&self.sstables_index, self.bloom_hasher)?;
 
         Ok(())
     }
@@ -228,6 +223,7 @@ impl SSTables {
         // return the len.
         assert!(
             self.sstables_index.levels.l0.len()
+                + self.sstables_index.levels.l1.len()
                 == self.sstables.tablereaders.len()
         );
         self.sstables.tablereaders.len()
@@ -266,11 +262,18 @@ impl SSTablesReader {
     /// for keys in the Vec of sstable files, organised newest
     /// to oldest.
     fn new(
-        sstable_files: Vec<PathBuf>,
+        sst_idx: &SSTableIndex,
         bloom_hasher: SipHasher13,
     ) -> Result<SSTablesReader, Error> {
         let mut tablereaders: Vec<Arc<TableReader>> = vec![];
-        for p in sstable_files {
+        for p in sst_idx.levels.l0.clone() {
+            tablereaders.push(Arc::new(TableReader::new(p.clone())?));
+        }
+        // TODO for now assume that we have only one big compacted
+        // table in the l1 sorted run. (strictly this would work
+        // regardless as each file in a multi-file sorted run is
+        // non-overlapping).
+        for p in sst_idx.levels.l1.clone() {
             tablereaders.push(Arc::new(TableReader::new(p.clone())?));
         }
         Ok(SSTablesReader {
