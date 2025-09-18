@@ -31,7 +31,7 @@ use crate::kvrecord::KVValue;
 
 mod builder;
 pub mod iterator;
-mod tableindex;
+pub(crate) mod tableindex;
 
 pub(crate) struct SSTableWriter {
     pub(crate) fname: PathBuf,
@@ -153,7 +153,11 @@ impl SSTables {
         &self,
         policy: impl CompactionPolicy,
     ) -> Result<CompactionTask, ToyKVError> {
-        policy.build_task(&self)
+        policy.build_task(
+            self.d.clone(),
+            self.bloom_hasher,
+            &self.sstables_index,
+        )
     }
 
     /// Try to commit a new l0, replacing the set of
@@ -163,27 +167,34 @@ impl SSTables {
     /// If this happens, the compaction is void and should
     /// be retried. GC will clean up the failed compaction
     /// path (TODO).
-    pub(crate) fn try_commit_compaction_v2(
+    pub(crate) fn try_commit_compaction_v3(
         &mut self,
         c_result: CompactionTaskResult,
     ) -> Result<(), ToyKVError> {
-        let c_inputs = c_result.inputs;
-        let c_output = c_result.output;
+        let c_input_plan = c_result.input_plan;
+        let mut c_output = c_result.output_plan;
 
-        // If c_paths is not the tail of l0, then some
-        // other compaction or unexpected change has
-        // happened to l0 after the compact started.
-        // This is bad, fail the commit.
-        if !self.is_tail(&self.sstables_index.levels.l0, &c_inputs) {
+        // Replace l0 tail --- we might have written a new
+        // memtable to the head of the list, but the tail
+        // should still be identical to what the input was.
+        if !self.is_tail(&self.sstables_index.levels.l0, &c_input_plan.l0) {
             return Err(ToyKVError::CompactionCommitFailure(
                 "Compacted paths not tail of existing l0".to_string(),
             ));
         }
-
-        // Replace the compacted sstables with the new compacted sstable.
-        let t_len = self.sstables_index.levels.l0.len() - c_inputs.len();
+        let t_len = self.sstables_index.levels.l0.len() - c_input_plan.l0.len();
         self.sstables_index.levels.l0.truncate(t_len);
-        self.sstables_index.levels.l0.push(c_output);
+        self.sstables_index.levels.l0.append(&mut c_output.l0);
+
+        // l1 should be _exactly_ the same; we replace it all
+        if !(self.sstables_index.levels.l1 == c_input_plan.l1) {
+            return Err(ToyKVError::CompactionCommitFailure(
+                "Compacted paths not exactly existing l1".to_string(),
+            ));
+        }
+        self.sstables_index.levels.l1.clear();
+        self.sstables_index.levels.l1.append(&mut c_output.l1);
+
         self.sstables_index.write()?;
 
         // Load new SSTablesReader for the new state.

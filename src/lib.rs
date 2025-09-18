@@ -239,7 +239,7 @@ impl ToyKV {
         // Commit the compacted table while holding write lock.
         {
             let mut state = self.state.write().unwrap();
-            state.sstables.try_commit_compaction_v2(c_result)?;
+            state.sstables.try_commit_compaction_v3(c_result)?;
         }
 
         self.metrics.compacts.fetch_add(1, Ordering::Relaxed);

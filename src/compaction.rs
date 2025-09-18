@@ -1,7 +1,11 @@
+use std::ops::Bound;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use siphasher::sip::SipHasher13;
 
+use crate::table::iterator::TableReader;
+use crate::table::tableindex::SSTableIndex;
 use crate::{
     error::ToyKVError,
     merge_iterator2::MergeIterator,
@@ -9,12 +13,21 @@ use crate::{
         iterator::TableIterator, SSTableWriter, SSTables, TableIteratorPaths,
     },
 };
+
+#[derive(Debug)]
+pub(crate) struct CompactionPlan {
+    pub(crate) l0: Vec<PathBuf>,
+    pub(crate) l1: Vec<PathBuf>,
+}
+
 /// Utility Trait to gather the paths for TableIterators
 pub(crate) trait CompactionPolicy {
     /// Retrieve the paths on disk for the TableIterators
     fn build_task(
         &self,
-        sstables: &SSTables,
+        sst_dir: PathBuf,
+        sst_bloom_hasher: SipHasher13,
+        sst_idx: &SSTableIndex,
     ) -> Result<CompactionTask, ToyKVError>;
 }
 
@@ -26,27 +39,58 @@ impl SimpleCompactionPolicy {
     pub(crate) fn new() -> Self {
         SimpleCompactionPolicy {}
     }
+
     fn iters_to_compact(
         &self,
-        sstables: &SSTables,
+        sstables: &SSTableIndex,
     ) -> Result<Vec<TableIterator>, ToyKVError> {
-        sstables
-            .iters(None, std::ops::Bound::Unbounded)
-            .map_err(|e| e.into())
+        let paths = sstables.levels.l0.clone();
+        self.iters(paths, None, std::ops::Bound::Unbounded)
+    }
+
+    fn iters(
+        &self,
+        paths: Vec<PathBuf>,
+        k: Option<&[u8]>,
+        upper_bound: Bound<Vec<u8>>,
+    ) -> Result<Vec<TableIterator>, ToyKVError> {
+        let mut vec = vec![];
+        for p in paths {
+            let tr = Arc::new(TableReader::new(p)?);
+            let t = match k {
+                Some(k) => TableIterator::new_seeked_with_tablereader(
+                    tr,
+                    k,
+                    upper_bound.clone(),
+                )?,
+                None => TableIterator::new_with_tablereader(
+                    tr,
+                    upper_bound.clone(),
+                )?,
+            };
+            vec.push(t);
+        }
+        Ok(vec)
     }
 }
+
 impl CompactionPolicy for SimpleCompactionPolicy {
     fn build_task(
         &self,
-        sstables: &SSTables,
+        sst_dir: PathBuf,
+        sst_bloom_hasher: SipHasher13,
+        sst_idx: &SSTableIndex,
     ) -> Result<CompactionTask, ToyKVError> {
-        let iters = self.iters_to_compact(sstables)?;
+        let iters = self.iters_to_compact(sst_idx)?;
         let input_paths = iters.table_paths();
         Ok(CompactionTask {
-            d: sstables.store_directory(),
-            bloom_hasher: sstables.bloom_hasher(),
+            d: sst_dir,
+            bloom_hasher: sst_bloom_hasher,
             input_iters: iters,
-            input_paths,
+            input_plan: CompactionPlan {
+                l0: input_paths,
+                l1: vec![],
+            },
         })
     }
 }
@@ -67,14 +111,13 @@ pub(crate) struct CompactionTask {
     /// TableIterators to merge, ordered as usual, newest to oldest
     pub(crate) input_iters: Vec<TableIterator>,
     /// The files that were compacted in this Task
-    pub(crate) input_paths: Vec<PathBuf>,
+    pub(crate) input_plan: CompactionPlan,
 }
 
 #[derive(Debug)]
 pub(crate) struct CompactionTaskResult {
-    pub(crate) inputs: Vec<PathBuf>,
-    // TODO make this a Vec for sorted runs
-    pub(crate) output: PathBuf,
+    pub(crate) input_plan: CompactionPlan,
+    pub(crate) output_plan: CompactionPlan,
 }
 
 impl CompactionTask {
@@ -100,8 +143,11 @@ impl CompactionTask {
 
         // convert the Result to the right type if it's Ok(..)
         write_result.map(|write_result| CompactionTaskResult {
-            inputs: self.input_paths,
-            output: write_result.fname,
+            input_plan: self.input_plan,
+            output_plan: CompactionPlan {
+                l1: vec![],
+                l0: vec![write_result.fname],
+            },
         })
     }
 }
