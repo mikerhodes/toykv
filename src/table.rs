@@ -169,8 +169,8 @@ impl SSTables {
         c_policy: impl CompactionPolicy,
         c_result: CompactionTaskResult,
     ) -> Result<(), ToyKVError> {
-        let new_levels =
-            c_policy.updated_index(&self.sstables_index.levels, c_result)?;
+        let new_levels = c_policy
+            .create_updated_index(&self.sstables_index.levels, c_result)?;
 
         self.sstables_index.levels = new_levels;
         self.sstables_index.write()?;

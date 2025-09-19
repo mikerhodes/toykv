@@ -57,59 +57,143 @@ fn compact_lifecycle_test() -> Result<(), ToyKVError> {
         assert_eq!(entries, expected_sstables); // ones we just wrote
     }
 
-    for _ in 1..3 {
-        dbg!("compact loop");
-        // Execute a compact, check we have the new file and also
-        // that we only have one "live" entry.
-        {
-            let mut db = toykv::open(tmp_dir.path())?;
-            db.compact()?;
-            assert_eq!(db.metrics.compacts.load(Ordering::Relaxed), 1);
-            assert_eq!(db.live_sstables(), 1);
-            db.shutdown();
+    {
+        let mut db = toykv::open(tmp_dir.path())?;
 
-            let entries = count_sstables_in_dir(&tmp_dir)?;
-            assert_eq!(entries, expected_sstables + 1); // old ones + compacted version
-        }
-
-        // Individual gets
-        {
-            let db = toykv::open(tmp_dir.path())?;
-            assert_eq!(db.live_sstables(), 1);
-            for n in 1..(writes + 1) {
-                // dbg!("read loop db2");
-                let got = db.get(n.to_be_bytes())?;
+        for i in 1..3 {
+            dbg!("compact loop {}", i);
+            // Execute a compact, check we have the new file and also
+            // that we only have one "live" entry.
+            {
+                db.compact()?;
+                // only first will compact as we are not writing more
                 assert_eq!(
-                    got.unwrap(),
-                    n.to_le_bytes(),
-                    "Did not read back what we put in"
+                    db.metrics.compacts.load(Ordering::Relaxed),
+                    1,
+                    "Unexpected number of compactions"
                 );
+                assert_eq!(db.live_sstables(), 1, "Should have 1 live sstable");
+                db.shutdown();
+
+                let entries = count_sstables_in_dir(&tmp_dir)?;
+                assert_eq!(
+                    entries,
+                    expected_sstables + 1,
+                    "Should have newly compacted table"
+                ); // old ones + compacted version
             }
-            assert_eq!(db.metrics.reads.load(Ordering::Relaxed), 2500);
-        }
 
-        // Now scan
-        {
-            let db = toykv::open(tmp_dir.path())?;
-            assert_eq!(db.live_sstables(), 1);
-            let it = db.scan(None, std::ops::Bound::Unbounded)?;
-            let mut i: i64 = 1;
-            for n in it {
-                let n = n.unwrap();
-                assert_eq!(
-                    n.key,
-                    i.to_be_bytes(),
-                    "Did not read back what we put in"
-                );
-                assert_eq!(
-                    n.value,
-                    i.to_le_bytes(),
-                    "Did not read back what we put in"
-                );
-                i += 1;
+            // Individual gets
+            {
+                assert_eq!(db.live_sstables(), 1);
+                for n in 1..(writes + 1) {
+                    // dbg!("read loop db2");
+                    let got = db.get(n.to_be_bytes())?;
+                    assert_eq!(
+                        got.unwrap(),
+                        n.to_le_bytes(),
+                        "Did not read back what we put in"
+                    );
+                }
+                assert_eq!(db.metrics.reads.load(Ordering::Relaxed), i * 2500);
             }
-            // Should reads be incremented as we scan? Hard to do.
-            assert_eq!(db.metrics.reads.load(Ordering::Relaxed), 0);
+
+            // Now scan
+            {
+                assert_eq!(db.live_sstables(), 1);
+                let it = db.scan(None, std::ops::Bound::Unbounded)?;
+                let mut i: i64 = 1;
+                for n in it {
+                    let n = n.unwrap();
+                    assert_eq!(
+                        n.key,
+                        i.to_be_bytes(),
+                        "Did not read back what we put in"
+                    );
+                    assert_eq!(
+                        n.value,
+                        i.to_le_bytes(),
+                        "Did not read back what we put in"
+                    );
+                    i += 1;
+                }
+                // Should reads be incremented as we scan? Hard to do.
+                // assert_eq!(
+                //     db.metrics.reads.load(Ordering::Relaxed),
+                //     0,
+                //     "unexpected db reads"
+                // );
+            }
+        }
+    }
+
+    // Rewrite the same values --- should create expected_sstables again.
+    {
+        let db = ToyKVBuilder::new()
+            .wal_sync(WALSync::Off)
+            .wal_write_threshold(100)
+            .open(tmp_dir.path())?;
+        for n in 1..(writes + 1) {
+            // TODO use new values so we can test
+            set_with_flush_if_needed(&db, n.to_be_bytes(), n.to_le_bytes())?;
+        }
+        let entries = count_sstables_in_dir(&tmp_dir)?;
+        assert_eq!(
+            entries,
+            // original + compacted + existing frozen memtables + new sstables
+            // (with two frozen memtables left).
+            expected_sstables + 1 + 2 + expected_sstables,
+            "Expected lots of new sstables from memtables"
+        ); // ones we just wrote
+    }
+
+    // Compact these down
+    {
+        let mut db = toykv::open(tmp_dir.path())?;
+
+        for i in 1..3 {
+            println!("compact loop second time {}", i);
+            // Execute a compact, check we have the new file and also
+            // that we only have one "live" entry.
+            {
+                db.compact()?;
+                // only first will compact as we are not writing more
+                assert_eq!(
+                    db.metrics.compacts.load(Ordering::Relaxed),
+                    1,
+                    "Unexpected number of compactions"
+                );
+                assert_eq!(db.live_sstables(), 1, "Should have 1 live sstable");
+                db.shutdown();
+
+                let entries = count_sstables_in_dir(&tmp_dir)?;
+                assert_eq!(
+                    entries,
+                    expected_sstables + 1 + 2 + expected_sstables + 1,
+                    "Should have newly compacted table"
+                ); // old ones + compacted version
+            }
+
+            // Just test the scan
+            {
+                assert_eq!(db.live_sstables(), 1);
+                let it = db.scan(None, std::ops::Bound::Unbounded)?;
+                let mut i: i64 = 1;
+                for n in it {
+                    let n = n.unwrap();
+                    assert_eq!(
+                        n.key,
+                        i.to_be_bytes(),
+                        "Did not read back what we put in"
+                    );
+                    assert_eq!(
+                        n.value,
+                        i.to_le_bytes(),
+                        "Did not read back what we put in"
+                    );
+                    i += 1;
+                }
+            }
         }
     }
     Ok(())

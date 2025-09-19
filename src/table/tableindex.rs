@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct SSTableIndexLevels {
     /// l0 is a set of files where each is a complete sorted
     /// run: it covers the whole of the keyspace.
@@ -16,7 +16,7 @@ pub(crate) struct SSTableIndexLevels {
     pub(crate) l1: Vec<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct SSTableIndex {
     pub(crate) levels: SSTableIndexLevels,
 
