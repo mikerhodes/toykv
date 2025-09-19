@@ -6,6 +6,20 @@ use toykv::{error::ToyKVError, ToyKV, ToyKVBuilder, WALSync};
 fn compact_sanity_check() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
 
+    {
+        let mut db = ToyKVBuilder::new()
+            .wal_sync(WALSync::Off)
+            .wal_write_threshold(100)
+            .open(tmp_dir.path())?;
+        db.compact()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn compact_lifecycle_test() -> Result<(), ToyKVError> {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
     // expected sstables after first write, before compaction
     let expected_sstables: usize = 2500 / 100 - 2;
 
@@ -43,57 +57,60 @@ fn compact_sanity_check() -> Result<(), ToyKVError> {
         assert_eq!(entries, expected_sstables); // ones we just wrote
     }
 
-    // Execute a compact, check we have the new file and also
-    // that we only have one "live" entry.
-    {
-        let mut db = toykv::open(tmp_dir.path())?;
-        db.compact()?;
-        assert_eq!(db.metrics.compacts.load(Ordering::Relaxed), 1);
-        assert_eq!(db.live_sstables(), 1);
-        db.shutdown();
+    for _ in 1..3 {
+        dbg!("compact loop");
+        // Execute a compact, check we have the new file and also
+        // that we only have one "live" entry.
+        {
+            let mut db = toykv::open(tmp_dir.path())?;
+            db.compact()?;
+            assert_eq!(db.metrics.compacts.load(Ordering::Relaxed), 1);
+            assert_eq!(db.live_sstables(), 1);
+            db.shutdown();
 
-        let entries = count_sstables_in_dir(&tmp_dir)?;
-        assert_eq!(entries, expected_sstables + 1); // old ones + compacted version
-    }
-
-    // Individual gets
-    {
-        let db = toykv::open(tmp_dir.path())?;
-        assert_eq!(db.live_sstables(), 1);
-        for n in 1..(writes + 1) {
-            // dbg!("read loop db2");
-            let got = db.get(n.to_be_bytes())?;
-            assert_eq!(
-                got.unwrap(),
-                n.to_le_bytes(),
-                "Did not read back what we put in"
-            );
+            let entries = count_sstables_in_dir(&tmp_dir)?;
+            assert_eq!(entries, expected_sstables + 1); // old ones + compacted version
         }
-        assert_eq!(db.metrics.reads.load(Ordering::Relaxed), 2500);
-    }
 
-    // Now scan
-    {
-        let db = toykv::open(tmp_dir.path())?;
-        assert_eq!(db.live_sstables(), 1);
-        let it = db.scan(None, std::ops::Bound::Unbounded)?;
-        let mut i: i64 = 1;
-        for n in it {
-            let n = n.unwrap();
-            assert_eq!(
-                n.key,
-                i.to_be_bytes(),
-                "Did not read back what we put in"
-            );
-            assert_eq!(
-                n.value,
-                i.to_le_bytes(),
-                "Did not read back what we put in"
-            );
-            i += 1;
+        // Individual gets
+        {
+            let db = toykv::open(tmp_dir.path())?;
+            assert_eq!(db.live_sstables(), 1);
+            for n in 1..(writes + 1) {
+                // dbg!("read loop db2");
+                let got = db.get(n.to_be_bytes())?;
+                assert_eq!(
+                    got.unwrap(),
+                    n.to_le_bytes(),
+                    "Did not read back what we put in"
+                );
+            }
+            assert_eq!(db.metrics.reads.load(Ordering::Relaxed), 2500);
         }
-        // Should reads be incremented as we scan? Hard to do.
-        assert_eq!(db.metrics.reads.load(Ordering::Relaxed), 0);
+
+        // Now scan
+        {
+            let db = toykv::open(tmp_dir.path())?;
+            assert_eq!(db.live_sstables(), 1);
+            let it = db.scan(None, std::ops::Bound::Unbounded)?;
+            let mut i: i64 = 1;
+            for n in it {
+                let n = n.unwrap();
+                assert_eq!(
+                    n.key,
+                    i.to_be_bytes(),
+                    "Did not read back what we put in"
+                );
+                assert_eq!(
+                    n.value,
+                    i.to_le_bytes(),
+                    "Did not read back what we put in"
+                );
+                i += 1;
+            }
+            // Should reads be incremented as we scan? Hard to do.
+            assert_eq!(db.metrics.reads.load(Ordering::Relaxed), 0);
+        }
     }
     Ok(())
 }

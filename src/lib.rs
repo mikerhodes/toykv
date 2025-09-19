@@ -230,16 +230,19 @@ impl ToyKV {
         // Get a table compaction task from the sstables structure.
         let c_task = {
             let state = self.state.read().unwrap();
-            state.sstables.build_compaction_task_v2(policy)?
+            state.sstables.build_compaction_task_v2(&policy)?
         };
 
         // Compaction task is safe to run outside state lock
-        let c_result = c_task.compact_v2()?;
+        let c_result = match c_task {
+            Some(c_task) => c_task.compact_v2()?,
+            None => return Ok(()), // No compaction needed
+        };
 
         // Commit the compacted table while holding write lock.
         {
             let mut state = self.state.write().unwrap();
-            state.sstables.try_commit_compaction_v3(c_result)?;
+            state.sstables.try_commit_compaction_v3(policy, c_result)?;
         }
 
         self.metrics.compacts.fetch_add(1, Ordering::Relaxed);

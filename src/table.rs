@@ -148,8 +148,8 @@ impl SSTables {
     /// a set of memtables using compact_v2 method.
     pub(crate) fn build_compaction_task_v2(
         &self,
-        policy: impl CompactionPolicy,
-    ) -> Result<CompactionTask, ToyKVError> {
+        policy: &impl CompactionPolicy,
+    ) -> Result<Option<CompactionTask>, ToyKVError> {
         policy.build_task(
             self.d.clone(),
             self.bloom_hasher,
@@ -166,32 +166,13 @@ impl SSTables {
     /// path (TODO).
     pub(crate) fn try_commit_compaction_v3(
         &mut self,
+        c_policy: impl CompactionPolicy,
         c_result: CompactionTaskResult,
     ) -> Result<(), ToyKVError> {
-        let c_input_plan = c_result.input_plan;
-        let mut c_output = c_result.output_plan;
+        let new_levels =
+            c_policy.updated_index(&self.sstables_index.levels, c_result)?;
 
-        // Replace l0 tail --- we might have written a new
-        // memtable to the head of the list, but the tail
-        // should still be identical to what the input was.
-        if !self.is_tail(&self.sstables_index.levels.l0, &c_input_plan.l0) {
-            return Err(ToyKVError::CompactionCommitFailure(
-                "Compacted paths not tail of existing l0".to_string(),
-            ));
-        }
-        let t_len = self.sstables_index.levels.l0.len() - c_input_plan.l0.len();
-        self.sstables_index.levels.l0.truncate(t_len);
-        self.sstables_index.levels.l0.append(&mut c_output.l0);
-
-        // l1 should be _exactly_ the same; we replace it all
-        if !(self.sstables_index.levels.l1 == c_input_plan.l1) {
-            return Err(ToyKVError::CompactionCommitFailure(
-                "Compacted paths not exactly existing l1".to_string(),
-            ));
-        }
-        self.sstables_index.levels.l1.clear();
-        self.sstables_index.levels.l1.append(&mut c_output.l1);
-
+        self.sstables_index.levels = new_levels;
         self.sstables_index.write()?;
 
         // Load new SSTablesReader for the new state.
@@ -233,15 +214,6 @@ impl SSTables {
     pub(crate) fn next_sstable_fname(dir: &Path) -> PathBuf {
         let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
         dir.join(format!("{}.sstable", s))
-    }
-
-    /// Return whether candidate_tail is the tail of v.
-    fn is_tail<T: PartialEq>(&self, v: &[T], candidate_tail: &[T]) -> bool {
-        if candidate_tail.len() > v.len() {
-            return false;
-        }
-        let potential_tail = &v[v.len() - candidate_tail.len()..];
-        potential_tail == candidate_tail
     }
 }
 
