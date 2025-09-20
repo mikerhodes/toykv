@@ -23,7 +23,8 @@ use crate::{
     merge_iterator2::MergeIterator,
 };
 use builder::TableBuilder;
-use iterator::{TableIterator, TableReader};
+use iterator::TableIterator;
+use reader::TableReader;
 use siphasher::sip::SipHasher13;
 use tableindex::SSTableIndex;
 
@@ -31,6 +32,7 @@ use crate::kvrecord::KVValue;
 
 mod builder;
 pub mod iterator;
+pub mod reader;
 pub(crate) mod tableindex;
 
 pub(crate) struct SSTableWriter {
@@ -293,6 +295,7 @@ impl SSTablesReader {
             }
         }
         // Next check L1
+        // TODO ConcatIterator
         for tr in self
             .l1_tablereaders
             .iter()
@@ -338,6 +341,7 @@ impl SSTablesReader {
             };
             vec.push(t);
         }
+        // TODO ConcatIterator
         for tr in &self.l1_tablereaders {
             let t = match k {
                 Some(k) => TableIterator::new_seeked_with_tablereader(
@@ -358,9 +362,13 @@ impl SSTablesReader {
 
 #[derive(Debug)]
 pub(crate) struct BlockMeta {
+    /// Start offset of block in file
     pub(crate) start_offset: u32,
+    /// End offset of block in file
     pub(crate) end_offset: u32,
+    /// First key in block
     pub(crate) first_key: Vec<u8>,
+    /// Last key in block
     pub(crate) last_key: Vec<u8>,
 }
 

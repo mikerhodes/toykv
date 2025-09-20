@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use siphasher::sip::SipHasher13;
 
-use crate::table::iterator::TableReader;
+use crate::table::reader::TableReader;
 use crate::table::tableindex::{SSTableIndex, SSTableIndexLevels};
 use crate::{
     error::ToyKVError,
