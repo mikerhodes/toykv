@@ -92,7 +92,7 @@ fn compact_lifecycle_test() -> Result<(), ToyKVError> {
                     assert_eq!(
                         got.unwrap(),
                         n.to_le_bytes(),
-                        "Did not read back what we put in"
+                        "Did not read back what we put in - get key/value"
                     );
                 }
                 assert_eq!(db.metrics.reads.load(Ordering::Relaxed), i * 2500);
@@ -108,12 +108,12 @@ fn compact_lifecycle_test() -> Result<(), ToyKVError> {
                     assert_eq!(
                         n.key,
                         i.to_be_bytes(),
-                        "Did not read back what we put in"
+                        "Did not read back what we put in - scan key"
                     );
                     assert_eq!(
                         n.value,
                         i.to_le_bytes(),
-                        "Did not read back what we put in"
+                        "Did not read back what we put in - scan value"
                     );
                     i += 1;
                 }

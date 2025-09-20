@@ -204,10 +204,14 @@ impl SSTables {
         // return the len.
         assert!(
             self.sstables_index.levels.l0.len()
-                + self.sstables_index.levels.l1.len()
-                == self.sstables.tablereaders.len()
+                == self.sstables.l0_tablereaders.len()
         );
-        self.sstables.tablereaders.len()
+        assert!(
+            self.sstables_index.levels.l1.len()
+                == self.sstables.l1_tablereaders.len()
+        );
+        self.sstables.l0_tablereaders.len()
+            + self.sstables.l1_tablereaders.len()
     }
 
     /// Return a new sstable path, contained in dir
@@ -221,7 +225,8 @@ impl SSTables {
 struct SSTablesReader {
     /// tables maintains a set of BufReaders on every sstable
     /// file in the set. This isn't that scalable.
-    tablereaders: Vec<Arc<TableReader>>,
+    l0_tablereaders: Vec<Arc<TableReader>>,
+    l1_tablereaders: Vec<Arc<TableReader>>,
     bloom_hasher: SipHasher13,
 }
 
@@ -237,19 +242,21 @@ impl SSTablesReader {
         sst_idx: &SSTableIndex,
         bloom_hasher: SipHasher13,
     ) -> Result<SSTablesReader, Error> {
-        let mut tablereaders: Vec<Arc<TableReader>> = vec![];
+        let mut l0_tablereaders: Vec<Arc<TableReader>> = vec![];
         for p in sst_idx.levels.l0.clone() {
-            tablereaders.push(Arc::new(TableReader::new(p.clone())?));
+            l0_tablereaders.push(Arc::new(TableReader::new(p.clone())?));
         }
         // TODO for now assume that we have only one big compacted
         // table in the l1 sorted run. (strictly this would work
         // regardless as each file in a multi-file sorted run is
         // non-overlapping).
+        let mut l1_tablereaders: Vec<Arc<TableReader>> = vec![];
         for p in sst_idx.levels.l1.clone() {
-            tablereaders.push(Arc::new(TableReader::new(p.clone())?));
+            l1_tablereaders.push(Arc::new(TableReader::new(p.clone())?));
         }
         Ok(SSTablesReader {
-            tablereaders,
+            l0_tablereaders,
+            l1_tablereaders,
             bloom_hasher,
         })
     }
@@ -262,8 +269,32 @@ impl SSTablesReader {
         // k, return None.
         // let mut tables_searched = 0;
         let hash = self.bloom_hasher.hash(k);
+
+        // First check L0
         for tr in self
-            .tablereaders
+            .l0_tablereaders
+            .iter()
+            .filter(|t| t.might_contain_hashed_key(hash))
+        {
+            // dbg!("t in tables");
+            // tables_searched += 1;
+            let mut t = TableIterator::new_seeked_with_tablereader(
+                tr.clone(),
+                k,
+                Bound::Unbounded,
+            )?;
+            match t.next() {
+                Some(Ok(v)) if v.key == k => {
+                    // dbg!(tables_searched);
+                    return Ok(Some(v.value));
+                }
+                Some(Ok(_)) | None => continue, // not in this sstable
+                Some(Err(x)) => return Err(x),
+            }
+        }
+        // Next check L1
+        for tr in self
+            .l1_tablereaders
             .iter()
             .filter(|t| t.might_contain_hashed_key(hash))
         {
@@ -293,7 +324,21 @@ impl SSTablesReader {
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<Vec<TableIterator>, Error> {
         let mut vec = vec![];
-        for tr in &self.tablereaders {
+        for tr in &self.l0_tablereaders {
+            let t = match k {
+                Some(k) => TableIterator::new_seeked_with_tablereader(
+                    tr.clone(),
+                    k,
+                    upper_bound.clone(),
+                )?,
+                None => TableIterator::new_with_tablereader(
+                    tr.clone(),
+                    upper_bound.clone(),
+                )?,
+            };
+            vec.push(t);
+        }
+        for tr in &self.l1_tablereaders {
             let t = match k {
                 Some(k) => TableIterator::new_seeked_with_tablereader(
                     tr.clone(),
