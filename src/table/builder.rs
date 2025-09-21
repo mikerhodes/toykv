@@ -37,7 +37,7 @@ pub(crate) struct TableBuilder {
     hasher: SipHasher13,
 }
 impl TableBuilder {
-    pub(super) fn new(
+    pub(crate) fn new(
         hasher: SipHasher13,
         expected_writes: usize,
     ) -> TableBuilder {
@@ -59,7 +59,7 @@ impl TableBuilder {
             hasher,
         }
     }
-    pub(super) fn add(
+    pub(crate) fn add(
         &mut self,
         key: &[u8],
         value: &KVValue,
@@ -90,7 +90,7 @@ impl TableBuilder {
         Ok(())
     }
 
-    pub(super) fn write(&mut self, p: &Path) -> std::io::Result<()> {
+    pub(crate) fn write(&mut self, p: &Path) -> std::io::Result<()> {
         // Write out data block if we need to
         self.finalise_block();
 

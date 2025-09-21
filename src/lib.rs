@@ -12,6 +12,7 @@ use table::SSTables;
 mod block;
 mod blockiterator;
 mod compaction;
+mod concat_iterator;
 pub mod error;
 mod kvrecord;
 mod memtable;

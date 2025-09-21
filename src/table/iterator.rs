@@ -43,6 +43,31 @@ impl TableIterator {
         })
     }
 
+    /// Create a new bounded TableIterator for tr.
+    /// Bound::Excluded is not supported and will panic.
+    pub(crate) fn new_bounded_with_tablereader(
+        tr: Arc<TableReader>,
+        lower_bound: Bound<Vec<u8>>,
+        upper_bound: Bound<Vec<u8>>,
+    ) -> Result<TableIterator, Error> {
+        match lower_bound {
+            Bound::Unbounded => {
+                TableIterator::new_with_tablereader(tr, upper_bound)
+            }
+            Bound::Included(key) => TableIterator::new_seeked_with_tablereader(
+                tr,
+                &key,
+                upper_bound,
+            ),
+            Bound::Excluded(_) => {
+                // TODO use a ToyKVError instead.
+                panic!("TableIterator doesn't support Bound::Excluded")
+            }
+        }
+    }
+
+    /// Create a TableReader that's seeked to start (Bound::Unbounded) and
+    /// will stop at upper_bound.
     pub(crate) fn new_with_tablereader(
         tr: Arc<TableReader>,
         upper_bound: Bound<Vec<u8>>,
@@ -56,6 +81,8 @@ impl TableIterator {
         })
     }
 
+    /// Create a TableReader that's seeked to k (Bound::Included) and
+    /// will stop at upper_bound.
     pub(crate) fn new_seeked_with_tablereader(
         tr: Arc<TableReader>,
         key: &[u8],

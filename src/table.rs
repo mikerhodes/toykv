@@ -30,7 +30,7 @@ use tableindex::SSTableIndex;
 
 use crate::kvrecord::KVValue;
 
-mod builder;
+pub(crate) mod builder;
 pub mod iterator;
 pub mod reader;
 pub(crate) mod tableindex;

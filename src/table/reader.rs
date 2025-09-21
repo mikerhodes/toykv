@@ -244,11 +244,10 @@ mod tests {
     #[test]
     fn test_key_range_large_number_of_keys() {
         // Test with a large number of keys that span multiple blocks
-        let mut table_builder = TableBuilder::new(SipHasher13::new(), 10000);
-
         let num_keys = 5000;
-        // Use zero-padded keys to maintain lexicographic ordering
+        let mut table_builder = TableBuilder::new(SipHasher13::new(), num_keys);
         for i in 0..num_keys {
+            // Use zero-padded keys to maintain lexicographic ordering
             let key = format!("key{:06}", i);
             let value = format!("value{:0512}", i);
             add_kv(&mut table_builder, key.as_bytes(), value.as_bytes())
