@@ -19,6 +19,7 @@ const BLOOM_HASH_KEY: &[u8; 16] =
 
 use crate::{
     compaction::{CompactionPolicy, CompactionTask, CompactionTaskResult},
+    concat_iterator::ConcatIterator,
     error::ToyKVError,
     merge_iterator2::MergeIterator,
 };
@@ -186,7 +187,7 @@ impl SSTables {
 
     /// Retrieve the latest value for `k` in the on disk
     /// set of sstables.
-    pub(crate) fn get(&self, k: &[u8]) -> Result<Option<KVValue>, Error> {
+    pub(crate) fn get(&self, k: &[u8]) -> Result<Option<KVValue>, ToyKVError> {
         self.sstables.get(k)
     }
 
@@ -265,7 +266,7 @@ impl SSTablesReader {
 
     /// Search through the SSTables available to this reader for
     /// a key. Return an Option with its value.
-    fn get(&self, k: &[u8]) -> Result<Option<KVValue>, Error> {
+    fn get(&self, k: &[u8]) -> Result<Option<KVValue>, ToyKVError> {
         // self.tables is in the right order for scanning the sstables
         // on disk. Read each to find k. If no SSTable file contains
         // k, return None.
@@ -291,32 +292,24 @@ impl SSTablesReader {
                     return Ok(Some(v.value));
                 }
                 Some(Ok(_)) | None => continue, // not in this sstable
-                Some(Err(x)) => return Err(x),
+                Some(Err(x)) => return Err(x.into()),
             }
         }
         // Next check L1
-        // TODO ConcatIterator
-        for tr in self
-            .l1_tablereaders
-            .iter()
-            .filter(|t| t.might_contain_hashed_key(hash))
-        {
-            // dbg!("t in tables");
-            // tables_searched += 1;
-            let mut t = TableIterator::new_seeked_with_tablereader(
-                tr.clone(),
-                k,
-                Bound::Unbounded,
-            )?;
-            match t.next() {
-                Some(Ok(v)) if v.key == k => {
-                    // dbg!(tables_searched);
-                    return Ok(Some(v.value));
-                }
-                Some(Ok(_)) | None => continue, // not in this sstable
-                Some(Err(x)) => return Err(x),
+        let mut ci = ConcatIterator::new(
+            self.l1_tablereaders.clone(),
+            Bound::Included(k.to_vec()),
+            Bound::Included(k.to_vec()),
+        )?;
+        match ci.next() {
+            Some(Ok(v)) if v.key == k => {
+                // dbg!(tables_searched);
+                return Ok(Some(v.value));
             }
+            Some(Err(x)) => return Err(x),
+            _ => {} // not in L0
         }
+
         // Otherwise, we didn't find it.
         Ok(None)
     }

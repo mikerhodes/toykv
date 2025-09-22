@@ -210,6 +210,11 @@ impl TableIterator {
         let bm = &self.tr.bm[self.b_idx];
         Ok(Some(self.tr.load_block(bm)?))
     }
+
+    /// Return the first/last keys in this iterator as tuple
+    pub(crate) fn key_range(&self) -> (&Vec<u8>, &Vec<u8>) {
+        self.tr.key_range()
+    }
 }
 
 impl Iterator for TableIterator {
