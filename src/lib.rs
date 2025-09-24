@@ -2,7 +2,7 @@ use compaction::SimpleCompactionPolicy;
 use memtables::Memtables;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::{io::Error, ops::Bound, path::Path};
+use std::{ops::Bound, path::Path};
 
 use error::ToyKVError;
 use kvrecord::KVValue;
@@ -304,7 +304,7 @@ impl ToyKV {
         &'a self,
         start_key: Option<&'a [u8]>,
         upper_bound: Bound<Vec<u8>>,
-    ) -> Result<KVIterator, Error> {
+    ) -> Result<KVIterator, ToyKVError> {
         let lower_bound = match start_key {
             None => Bound::Unbounded,
             Some(k) => Bound::Included(k.to_vec()),
@@ -312,16 +312,14 @@ impl ToyKV {
 
         let state = self.state.read().unwrap();
         let mt_iters = state.memtables.iters(lower_bound, upper_bound.clone());
-        let sst_iters = state.sstables.iters(start_key, upper_bound.clone())?;
+        let sst_iter = state.sstables.iters(start_key, upper_bound.clone())?;
         drop(state);
 
-        let mut m = MergeIterator::<'a>::new();
+        let mut m = MergeIterator::new();
         for t in mt_iters.into_iter() {
             m.add_iterator(t);
         }
-        for t in sst_iters.into_iter() {
-            m.add_iterator(t);
-        }
+        m.add_iterator(sst_iter);
 
         Ok(KVIterator { i: m })
     }
@@ -332,11 +330,11 @@ pub struct KV {
     pub value: Vec<u8>,
 }
 
-pub struct KVIterator<'a> {
-    i: MergeIterator<'a>,
+pub struct KVIterator {
+    i: MergeIterator,
 }
 
-impl<'a> Iterator for KVIterator<'a> {
+impl Iterator for KVIterator {
     type Item = Result<KV, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {

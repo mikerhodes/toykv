@@ -2,7 +2,7 @@ use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::SkipMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::{io::Error, ops::Bound};
+use std::ops::Bound;
 
 use ouroboros::self_referencing;
 
@@ -164,7 +164,7 @@ pub(crate) struct MemtableIterator {
 impl MemtableIterator {
     fn entry_to_kvrecord(
         entry: Entry<Vec<u8>, KVValue>,
-    ) -> Result<KVRecord, Error> {
+    ) -> Result<KVRecord, ToyKVError> {
         Ok(KVRecord {
             key: entry.key().clone(),
             value: entry.value().clone(),
@@ -173,7 +173,7 @@ impl MemtableIterator {
 }
 
 impl Iterator for MemtableIterator {
-    type Item = Result<KVRecord, Error>;
+    type Item = Result<KVRecord, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.with_it_mut(|iter| match iter.next() {

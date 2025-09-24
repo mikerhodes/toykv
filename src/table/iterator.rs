@@ -11,6 +11,7 @@ use std::{io::Error, ops::Bound, path::PathBuf, sync::Arc};
 
 use siphasher::sip::SipHasher13;
 
+use crate::error::ToyKVError;
 use crate::{
     block::Block, blockiterator::BlockIterator, kvrecord::KVRecord,
     table::BlockMeta,
@@ -218,7 +219,7 @@ impl TableIterator {
 }
 
 impl Iterator for TableIterator {
-    type Item = Result<KVRecord, Error>;
+    type Item = Result<KVRecord, ToyKVError>;
 
     /// Return the next KVRecord in the file.
     fn next(&mut self) -> Option<Self::Item> {
@@ -245,7 +246,7 @@ impl Iterator for TableIterator {
             let new_block = self.load_next_block();
             match new_block {
                 Err(x) => {
-                    return Some(Err(x));
+                    return Some(Err(x.into()));
                 }
                 Ok(None) => {
                     return None;

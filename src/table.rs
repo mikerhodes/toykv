@@ -195,8 +195,8 @@ impl SSTables {
         &self,
         k: Option<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
-    ) -> Result<Vec<TableIterator>, Error> {
-        self.sstables.iters(k, upper_bound)
+    ) -> Result<MergeIterator, ToyKVError> {
+        self.sstables.iter(k, upper_bound)
     }
 
     /// Number of in-use sstables
@@ -295,6 +295,7 @@ impl SSTablesReader {
                 Some(Err(x)) => return Err(x.into()),
             }
         }
+
         // Next check L1
         let mut ci = ConcatIterator::new(
             self.l1_tablereaders.clone(),
@@ -314,12 +315,17 @@ impl SSTablesReader {
         Ok(None)
     }
 
-    fn iters(
+    /// Returns a MergeIterator for the entire set of sstables
+    /// on disk.
+    fn iter(
         &self,
         k: Option<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
-    ) -> Result<Vec<TableIterator>, Error> {
-        let mut vec = vec![];
+    ) -> Result<MergeIterator, ToyKVError> {
+        let mut mi = MergeIterator::new();
+
+        // Add each L0 sstable individually as each is
+        // an entire sorted run.
         for tr in &self.l0_tablereaders {
             let t = match k {
                 Some(k) => TableIterator::new_seeked_with_tablereader(
@@ -332,24 +338,26 @@ impl SSTablesReader {
                     upper_bound.clone(),
                 )?,
             };
-            vec.push(t);
+            mi.add_iterator(t);
         }
-        // TODO ConcatIterator
-        for tr in &self.l1_tablereaders {
-            let t = match k {
-                Some(k) => TableIterator::new_seeked_with_tablereader(
-                    tr.clone(),
-                    k,
-                    upper_bound.clone(),
-                )?,
-                None => TableIterator::new_with_tablereader(
-                    tr.clone(),
-                    upper_bound.clone(),
-                )?,
-            };
-            vec.push(t);
-        }
-        Ok(vec)
+
+        // All the files in L1 are a single sorted run,
+        // so create a ConcatIterator to iterate them.
+        let ci = match k {
+            Some(k) => ConcatIterator::new(
+                self.l1_tablereaders.clone(),
+                Bound::Included(k.to_vec()),
+                upper_bound.clone(),
+            )?,
+            None => ConcatIterator::new(
+                self.l1_tablereaders.clone(),
+                Bound::Unbounded,
+                upper_bound.clone(),
+            )?,
+        };
+        mi.add_iterator(ci);
+
+        Ok(mi)
     }
 }
 

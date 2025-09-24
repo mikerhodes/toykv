@@ -13,7 +13,6 @@
 use std::{
     cmp::{Ordering, Reverse},
     collections::BinaryHeap,
-    io::Error,
 };
 
 use crate::{error::ToyKVError, kvrecord::KVRecord};
@@ -21,7 +20,9 @@ use crate::{error::ToyKVError, kvrecord::KVRecord};
 /// TableIterator can iterate over either memtables or sstables (or
 /// Vecs during testing). We Box it so we can use polymorphism to
 /// loop over both memtables and sstables when scanning.
-type TableIterator<'a> = Box<dyn Iterator<Item = Result<KVRecord, Error>> + 'a>;
+type TableIterator<'a> =
+    Box<dyn Iterator<Item = Result<KVRecord, ToyKVError>> + 'a>;
+type TableIterator2 = Box<dyn Iterator<Item = Result<KVRecord, ToyKVError>>>;
 
 /// MergeIterator takes a vec of child iterators over KVRecord and
 /// emits the KVRecords from all child iterators, ordered by key. It
@@ -29,10 +30,10 @@ type TableIterator<'a> = Box<dyn Iterator<Item = Result<KVRecord, Error>> + 'a>;
 /// iterators contain KVRecords with the same key, the tie is broken
 /// by returning the KVRecord from the child iterator that was first
 /// added using `add_iterator`.
-pub(crate) struct MergeIterator<'a> {
+pub(crate) struct MergeIterator {
     /// lsmtables are the memtables and sstables underlying this MergeIterator
     stopped: bool,
-    heap: MinHeap<QueueItem<'a>>,
+    heap: MinHeap<QueueItem>,
     /// Lower age = more recent memtable/sstable
     next_iterator_age: u32,
     /// last_key is the last key we saw, to prevent emitting
@@ -40,25 +41,25 @@ pub(crate) struct MergeIterator<'a> {
     last_emitted_key: Option<Vec<u8>>,
 }
 
-struct QueueItem<'a> {
-    kvrecord: Result<KVRecord, Error>,
-    iterator: TableIterator<'a>,
+struct QueueItem {
+    kvrecord: Result<KVRecord, ToyKVError>,
+    iterator: TableIterator2,
     /// Lower age = more recent memtable/sstable
     age: u32,
 }
 
-impl<'a> PartialEq for QueueItem<'a> {
+impl PartialEq for QueueItem {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
-impl<'a> PartialOrd for QueueItem<'a> {
+impl PartialOrd for QueueItem {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
-impl<'a> Eq for QueueItem<'a> {}
-impl<'a> Ord for QueueItem<'a> {
+impl Eq for QueueItem {}
+impl Ord for QueueItem {
     /// cmp orders such that the following are lower for our min-heap:
     /// - Errors are lowest
     /// - Then lowest keys
@@ -111,7 +112,7 @@ impl<T: Ord> MinHeap<T> {
     }
 }
 
-impl<'a> MergeIterator<'a> {
+impl MergeIterator {
     pub fn new() -> Self {
         Self {
             stopped: false,
@@ -123,9 +124,9 @@ impl<'a> MergeIterator<'a> {
 
     pub fn add_iterator<I>(&mut self, iter: I)
     where
-        I: Iterator<Item = Result<KVRecord, Error>> + 'a,
+        I: Iterator<Item = Result<KVRecord, ToyKVError>> + 'static,
     {
-        let mut b: TableIterator<'a> = Box::new(iter);
+        let mut b: TableIterator2 = Box::new(iter);
 
         // Call next to put the first item into the iterator, so
         // we don't have to special case this in next() for MergeIterator.
@@ -140,7 +141,7 @@ impl<'a> MergeIterator<'a> {
         }
     }
 }
-impl<'a> Iterator for MergeIterator<'a> {
+impl Iterator for MergeIterator {
     type Item = Result<KVRecord, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -260,7 +261,8 @@ mod tests_merge_iterator {
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "oh no!",
-            )),
+            )
+            .into()),
             Ok(kv("cccc", "barC")),
         ];
         let sstable2 = vec![
