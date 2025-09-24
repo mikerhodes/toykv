@@ -69,7 +69,7 @@ impl TableIterator {
 
     /// Create a TableReader that's seeked to start (Bound::Unbounded) and
     /// will stop at upper_bound.
-    pub(crate) fn new_with_tablereader(
+    fn new_with_tablereader(
         tr: Arc<TableReader>,
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<TableIterator, Error> {
@@ -84,7 +84,7 @@ impl TableIterator {
 
     /// Create a TableReader that's seeked to k (Bound::Included) and
     /// will stop at upper_bound.
-    pub(crate) fn new_seeked_with_tablereader(
+    fn new_seeked_with_tablereader(
         tr: Arc<TableReader>,
         key: &[u8],
         upper_bound: Bound<Vec<u8>>,

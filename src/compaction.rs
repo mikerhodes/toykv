@@ -85,7 +85,11 @@ impl SimpleCompactionPolicy {
         let mut vec = vec![];
         for p in l0.iter().chain(l1) {
             let tr = Arc::new(TableReader::new(p.clone())?);
-            let t = TableIterator::new_with_tablereader(tr, Bound::Unbounded)?;
+            let t = TableIterator::new_bounded_with_tablereader(
+                tr,
+                Bound::Unbounded,
+                Bound::Unbounded,
+            )?;
             vec.push(t);
         }
         Ok(vec)
