@@ -27,7 +27,7 @@ pub(crate) struct Memtables {
     max_frozen_memtables: usize,
     wal_write_threshold: u64,
     wal_sync: WALSync,
-    max_memtable_size_bytes: u64,
+    target_memtable_size_bytes: u64,
 }
 
 impl Memtables {
@@ -35,7 +35,7 @@ impl Memtables {
         d: PathBuf,
         wal_sync: WALSync,
         wal_write_threshold: u64,
-        max_memtable_size_bytes: u64,
+        target_memtable_size_bytes: u64,
     ) -> Result<Self, ToyKVError> {
         let wal_index_path = d.join("wal_index.json");
         let mut wal_index = WALIndex::open(wal_index_path)?;
@@ -67,7 +67,7 @@ impl Memtables {
             max_frozen_memtables: 1,
             wal_write_threshold,
             wal_sync,
-            max_memtable_size_bytes,
+            target_memtable_size_bytes,
         })
     }
     pub(crate) fn write(
@@ -107,7 +107,7 @@ impl Memtables {
     fn active_memtable_full(&self) -> bool {
         let am = &self.active_memtable;
         am.wal_writes() >= self.wal_write_threshold
-            || am.estimated_size_bytes() > self.max_memtable_size_bytes
+            || am.estimated_size_bytes() > self.target_memtable_size_bytes
     }
 
     /// Return true if there are no more spaces for frozen memtables
