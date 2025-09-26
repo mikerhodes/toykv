@@ -28,6 +28,7 @@ impl ConcatIterator {
         // TODO if I alter find_starting_table_idx to instead be removing
         // the head of readers while the lower bound is not in the table,
         // then we can simplify this.
+        // More efficient if we reverse the readers, and pop from the end.
         let (start_table_idx, current_table_iterator) = if readers.len() > 0 {
             let start_table_idx =
                 ConcatIterator::find_starting_table_idx(&readers, &lower_bound);
