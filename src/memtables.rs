@@ -188,3 +188,54 @@ fn new_wal_path(dir: &Path) -> PathBuf {
     let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
     dir.join(format!("{}.wal", s))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{error::ToyKVError, kvrecord::KVValue};
+
+    use super::Memtables;
+
+    /// Helper for writing a key with a given length of value
+    fn write_kv(mt: &mut Memtables, key: &[u8], v_len: usize) {
+        let v = vec![b'V'; v_len];
+        mt.write(key.to_vec(), KVValue::Some(v)).unwrap();
+    }
+    /// Helper for deleting a key
+    fn delete_kv(mt: &mut Memtables, key: &[u8]) {
+        mt.write(key.to_vec(), KVValue::Deleted).unwrap();
+    }
+
+    #[test]
+    fn test_size_threshold() -> Result<(), ToyKVError> {
+        let d = tempfile::tempdir().expect("Failed to create temp dir");
+
+        let mut mts = Memtables::new(
+            d.into_path(),
+            crate::WALSync::Off,
+            2_500_000, // high enough not to be reached
+            1024,      // tiny 1KB target sstables size
+        )?;
+
+        // TODO, potentially want this to fail instead,
+        // when the new write would take us over the
+        // threshold.
+        // write_kv(&mut mts, b"key1", 513);
+        // write_kv(&mut mts, b"key2", 513);
+        // assert!(mts.active_memtable_full());
+        // assert!(mts.frozen_memtables_full());
+
+        // Current behaviour is that "full" is _after_
+        // we've already passed the target. I'm not
+        // sure this is the right approach, see above.
+        write_kv(&mut mts, b"key1", 513);
+        write_kv(&mut mts, b"key2", 513);
+        assert!(mts.active_memtable_full());
+        assert!(!mts.frozen_memtables_full());
+        write_kv(&mut mts, b"key1", 513);
+        write_kv(&mut mts, b"key2", 513);
+        assert!(mts.active_memtable_full());
+        assert!(mts.frozen_memtables_full());
+
+        Ok(())
+    }
+}
