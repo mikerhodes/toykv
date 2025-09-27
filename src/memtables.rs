@@ -75,6 +75,12 @@ impl Memtables {
         k: Vec<u8>,
         v: KVValue,
     ) -> Result<(), ToyKVError> {
+        // TODO rollover to the frozen table if the new kv would
+        // take us over the threshold --- same for frozen table
+        // full.
+        if self.needs_flush() {
+            return Err(ToyKVError::NeedFlush);
+        }
         if self.active_memtable_full() {
             let new_wal_path = new_wal_path(&self.d);
             self.wal_index.set_active_wal(&new_wal_path)?;

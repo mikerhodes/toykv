@@ -173,18 +173,13 @@ impl ToyKV {
     /// Internal method to write a KVValue to WAL and memtable
     fn write(&self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
         let mut state = self.state.write().unwrap();
-        if state.memtables.needs_flush() {
-            return Err(ToyKVError::NeedFlush);
-        }
-        match v {
-            KVValue::Deleted => {
-                self.metrics.deletes.fetch_add(1, Ordering::Relaxed);
-            }
-            KVValue::Some(_) => {
-                self.metrics.writes.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        // Save which metric to implement after successful
+        let metric = match v {
+            KVValue::Deleted => &self.metrics.deletes,
+            KVValue::Some(_) => &self.metrics.writes,
+        };
         state.memtables.write(k, v)?;
+        metric.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
