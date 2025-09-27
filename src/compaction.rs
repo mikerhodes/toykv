@@ -9,7 +9,7 @@ use crate::table::tableindex::{SSTableIndex, SSTableIndexLevels};
 use crate::{
     error::ToyKVError,
     merge_iterator2::MergeIterator,
-    table::{iterator::TableIterator, SSTableWriter, SSTables},
+    table::{iterator::TableIterator, SSTableNameGenerator, SSTableWriter},
 };
 
 #[derive(Debug)]
@@ -24,7 +24,7 @@ pub(crate) trait CompactionPolicy {
     /// is required.
     fn build_task(
         &self,
-        sst_dir: PathBuf,
+        sst_name_gen: SSTableNameGenerator,
         sst_bloom_hasher: SipHasher13,
         sst_idx: &SSTableIndex,
     ) -> Result<Option<CompactionTask>, ToyKVError>;
@@ -111,7 +111,7 @@ impl CompactionPolicy for SimpleCompactionPolicy {
     /// L1 tables into a single sorted run at L1.
     fn build_task(
         &self,
-        sst_dir: PathBuf,
+        sst_name_gen: SSTableNameGenerator,
         sst_bloom_hasher: SipHasher13,
         sst_idx: &SSTableIndex,
     ) -> Result<Option<CompactionTask>, ToyKVError> {
@@ -121,7 +121,7 @@ impl CompactionPolicy for SimpleCompactionPolicy {
         let input_plan = self.plan(sst_idx);
         let input_iters = self.iters(&input_plan.l0, &input_plan.l1)?;
         Ok(Some(CompactionTask {
-            d: sst_dir,
+            gen: sst_name_gen,
             bloom_hasher: sst_bloom_hasher,
             input_iters,
             input_plan,
@@ -193,7 +193,7 @@ impl CompactionPolicy for SimpleCompactionPolicy {
 /// run at a time.
 pub(crate) struct CompactionTask {
     /// Store directory
-    pub(crate) d: PathBuf,
+    pub(crate) gen: SSTableNameGenerator,
     /// Bloom hasher for sstables
     pub(crate) bloom_hasher: SipHasher13,
     /// TableIterators to merge, ordered as usual, newest to oldest
@@ -218,7 +218,7 @@ impl CompactionTask {
             mi.add_iterator(iter)
         }
         let w = SSTableWriter {
-            fname: SSTables::next_sstable_fname(self.d.as_path()),
+            fname: self.gen.next_sstable_fname(),
             bloom_hasher: self.bloom_hasher,
         };
 

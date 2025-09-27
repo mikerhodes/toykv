@@ -92,6 +92,7 @@ pub(crate) struct SSTables {
     d: PathBuf,
     sstables_index: SSTableIndex,
     sstables: SSTablesReader,
+    sst_name_gen: SSTableNameGenerator,
 
     // Ensure we share the same hashing between
     // builder and iterator for bloom filter.
@@ -105,10 +106,12 @@ impl SSTables {
         let sstables_index = SSTableIndex::open(index_path)?;
         let hasher = SipHasher13::new_with_key(BLOOM_HASH_KEY);
         let sstables = SSTablesReader::new(&sstables_index, hasher)?;
+        let sst_name_gen = SSTableNameGenerator { d: d.to_path_buf() };
         Ok(SSTables {
             d: d.to_path_buf(),
             sstables_index,
             sstables,
+            sst_name_gen,
             bloom_hasher: hasher,
         })
     }
@@ -127,7 +130,7 @@ impl SSTables {
     /// a single memtable using the `write` method.
     pub(crate) fn build_sstable_writer(&self) -> SSTableWriter {
         SSTableWriter {
-            fname: SSTables::next_sstable_fname(self.d.as_path()),
+            fname: self.sst_name_gen.next_sstable_fname(),
             bloom_hasher: self.bloom_hasher,
         }
     }
@@ -154,7 +157,7 @@ impl SSTables {
         policy: &impl CompactionPolicy,
     ) -> Result<Option<CompactionTask>, ToyKVError> {
         policy.build_task(
-            self.d.clone(),
+            self.sst_name_gen.clone(),
             self.bloom_hasher,
             &self.sstables_index,
         )
@@ -216,11 +219,17 @@ impl SSTables {
         self.sstables.l0_tablereaders.len()
             + self.sstables.l1_tablereaders.len()
     }
+}
 
-    /// Return a new sstable path, contained in dir
-    pub(crate) fn next_sstable_fname(dir: &Path) -> PathBuf {
+#[derive(Clone, Debug)]
+pub(crate) struct SSTableNameGenerator {
+    d: PathBuf,
+}
+
+impl SSTableNameGenerator {
+    pub(crate) fn next_sstable_fname(&self) -> PathBuf {
         let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
-        dir.join(format!("{}.sstable", s))
+        self.d.join(format!("{}.sstable", s))
     }
 }
 
