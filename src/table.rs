@@ -93,16 +93,22 @@ pub(crate) struct SSTables {
     sstables_index: SSTableIndex,
     sstables: SSTablesReader,
     sst_name_gen: SSTableNameGenerator,
+    target_sst_size_bytes: u64,
 
     // Ensure we share the same hashing between
     // builder and iterator for bloom filter.
     bloom_hasher: SipHasher13,
 }
 
+pub(crate) const SSTABLE_INDEX_FNAME: &str = "sstable_index.json";
+
 impl SSTables {
     /// Create a new SSTables whose files live in the directory d.
-    pub(crate) fn new(d: &Path) -> Result<SSTables, Error> {
-        let index_path = d.join("sstable_index.json");
+    pub(crate) fn new(
+        d: &Path,
+        target_sst_size_bytes: u64,
+    ) -> Result<SSTables, Error> {
+        let index_path = d.join(SSTABLE_INDEX_FNAME);
         let sstables_index = SSTableIndex::open(index_path)?;
         let hasher = SipHasher13::new_with_key(BLOOM_HASH_KEY);
         let sstables = SSTablesReader::new(&sstables_index, hasher)?;
@@ -113,6 +119,7 @@ impl SSTables {
             sstables,
             sst_name_gen,
             bloom_hasher: hasher,
+            target_sst_size_bytes,
         })
     }
 
@@ -160,6 +167,7 @@ impl SSTables {
             self.sst_name_gen.clone(),
             self.bloom_hasher,
             &self.sstables_index,
+            self.target_sst_size_bytes,
         )
     }
 
@@ -504,12 +512,14 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Should work on empty table
-        let _size = table_builder.estimate_size();
+        let size = table_builder.estimate_size_bytes();
+        assert_eq!(size, 0, "empty builder should have zero size");
 
         // Should work after adding entries
         let _ = table_builder
             .add(b"test_key", &KVValue::Some(b"test_value".into()));
-        let _size = table_builder.estimate_size();
+        let size = table_builder.estimate_size_bytes();
+        assert_eq!(size, 18, "empty builder should have zero size");
     }
 
     #[test]

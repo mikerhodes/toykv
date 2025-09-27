@@ -35,6 +35,9 @@ pub(crate) struct TableBuilder {
     /// BloomFilter for table
     bloom: Filter,
     hasher: SipHasher13,
+
+    /// Estimated size, updated as add() is called
+    estimated_size: u64,
 }
 impl TableBuilder {
     pub(crate) fn new(
@@ -57,6 +60,7 @@ impl TableBuilder {
             start,
             bloom,
             hasher,
+            estimated_size: 0,
         }
     }
     pub(crate) fn add(
@@ -64,6 +68,12 @@ impl TableBuilder {
         key: &[u8],
         value: &KVValue,
     ) -> Result<(), BlockBuilderError> {
+        self.estimated_size += key.len() as u64;
+        self.estimated_size += match value {
+            KVValue::Some(v) => v.len() as u64,
+            KVValue::Deleted => 0,
+        };
+
         let mut r = self.bb.add(key, value);
 
         // If full finalise block and start new one
@@ -130,9 +140,9 @@ impl TableBuilder {
     }
 
     /// Return the estimated size of this table.
-    pub(super) fn estimate_size(&self) -> usize {
+    pub(crate) fn estimate_size_bytes(&self) -> u64 {
         // data probably much larger than the metadata, so use that
-        return self.data.len();
+        return self.estimated_size;
     }
 
     /// Write the block out to our data buffer, and prepare a

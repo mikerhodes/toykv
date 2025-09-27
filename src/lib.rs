@@ -60,7 +60,7 @@ struct ToyKVState {
 struct ToyKVOptions {
     wal_sync: WALSync,
     wal_write_threshold: u64,
-    target_sstable_size_bytes: u64,
+    target_sst_size_bytes: u64,
 }
 
 pub struct ToyKVBuilder {
@@ -72,7 +72,7 @@ impl Default for ToyKVOptions {
         Self {
             wal_sync: WALSync::Full,
             wal_write_threshold: 250_000, // At 1kb kv pairs, 256MB
-            target_sstable_size_bytes: 256 * 1024 * 1024, // bytes
+            target_sst_size_bytes: 256 * 1024 * 1024, // bytes
         }
     }
 }
@@ -96,7 +96,7 @@ impl ToyKVBuilder {
     }
 
     pub fn target_sstable_size_bytes(mut self, size: u64) -> Self {
-        self.options.target_sstable_size_bytes = size;
+        self.options.target_sst_size_bytes = size;
         self
     }
 
@@ -109,9 +109,10 @@ impl ToyKVBuilder {
             d.to_path_buf(),
             self.options.wal_sync,
             self.options.wal_write_threshold,
-            self.options.target_sstable_size_bytes,
+            self.options.target_sst_size_bytes,
         )?;
-        let sstables = table::SSTables::new(d)?;
+        let sstables =
+            table::SSTables::new(d, self.options.target_sst_size_bytes)?;
         Ok(ToyKV {
             state: Arc::new(RwLock::new(ToyKVState {
                 memtables,

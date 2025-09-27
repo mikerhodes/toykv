@@ -4,13 +4,17 @@ use std::sync::Arc;
 
 use siphasher::sip::SipHasher13;
 
+use crate::table::builder::TableBuilder;
 use crate::table::reader::TableReader;
 use crate::table::tableindex::{SSTableIndex, SSTableIndexLevels};
 use crate::{
     error::ToyKVError,
     merge_iterator2::MergeIterator,
-    table::{iterator::TableIterator, SSTableNameGenerator, SSTableWriter},
+    table::{iterator::TableIterator, SSTableNameGenerator},
 };
+
+#[cfg(test)]
+mod compaction_v4_test;
 
 #[derive(Debug)]
 pub(crate) struct CompactionPlan {
@@ -27,6 +31,7 @@ pub(crate) trait CompactionPolicy {
         sst_name_gen: SSTableNameGenerator,
         sst_bloom_hasher: SipHasher13,
         sst_idx: &SSTableIndex,
+        target_sst_size_bytes: u64,
     ) -> Result<Option<CompactionTask>, ToyKVError>;
 
     fn create_updated_index(
@@ -114,6 +119,7 @@ impl CompactionPolicy for SimpleCompactionPolicy {
         sst_name_gen: SSTableNameGenerator,
         sst_bloom_hasher: SipHasher13,
         sst_idx: &SSTableIndex,
+        target_sst_size_bytes: u64,
     ) -> Result<Option<CompactionTask>, ToyKVError> {
         if !self.needs_compaction(sst_idx) {
             return Ok(None);
@@ -125,6 +131,7 @@ impl CompactionPolicy for SimpleCompactionPolicy {
             bloom_hasher: sst_bloom_hasher,
             input_iters,
             input_plan,
+            target_sst_size_bytes,
         }))
     }
 
@@ -200,6 +207,8 @@ pub(crate) struct CompactionTask {
     pub(crate) input_iters: Vec<TableIterator>,
     /// The files that were compacted in this Task
     pub(crate) input_plan: CompactionPlan,
+    /// Target sstable size
+    pub(crate) target_sst_size_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -217,25 +226,52 @@ impl CompactionTask {
         for iter in self.input_iters {
             mi.add_iterator(iter)
         }
-        let w = SSTableWriter {
-            fname: self.gen.next_sstable_fname(),
-            bloom_hasher: self.bloom_hasher,
-        };
-
         // we don't know this for now --- might have to
         // get the user to configure the expected size
         // of a k/v. Used for bloomfilter size.
         let expected_n_keys = 1000;
 
-        let write_result = w.write(expected_n_keys, mi);
+        // Set up the first sst builder and filename
+        let mut sst = TableBuilder::new(self.bloom_hasher, expected_n_keys);
+        let mut l1 = vec![];
 
-        // convert the Result to the right type if it's Ok(..)
-        write_result.map(|write_result| CompactionTaskResult {
+        // Loop through the entries in the mergeiterator, writing to
+        // the builder. Create a new builder and filename each time
+        // we hit the target size.
+        let mut i = 0;
+        for entry in mi {
+            println!("New entry {}", i);
+            i += 1;
+            let record = entry?;
+            assert!(sst.add(&record.key[..], &record.value).is_ok());
+
+            println!(
+                "{} > {}",
+                sst.estimate_size_bytes(),
+                self.target_sst_size_bytes
+            );
+            if sst.estimate_size_bytes() as u64 > self.target_sst_size_bytes {
+                println!("New SST");
+                // Generate here to avoid generating an extra name
+                // in the array for an empty file.
+                l1.push(self.gen.next_sstable_fname());
+                sst.write(&l1.last().unwrap())?;
+
+                sst = TableBuilder::new(self.bloom_hasher, expected_n_keys);
+            }
+        }
+
+        // Write final sst if not empty.
+        if sst.estimate_size_bytes() > 0 {
+            l1.push(self.gen.next_sstable_fname());
+            sst.write(&l1.last().unwrap())?;
+        }
+
+        dbg!(&l1);
+
+        Ok(CompactionTaskResult {
             input_plan: self.input_plan,
-            output_plan: CompactionPlan {
-                l0: vec![],
-                l1: vec![write_result.fname],
-            },
+            output_plan: CompactionPlan { l0: vec![], l1 },
         })
     }
 }
