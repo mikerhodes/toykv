@@ -1,8 +1,12 @@
 #[cfg(test)]
 mod tests {
-    use std::{fs, io, ops::Bound};
+    use std::{fs, io, ops::Bound, path::PathBuf};
 
     use crate::{
+        compaction::SimpleCompactionPolicy,
+        kvrecord::KVValue,
+        memtable::Memtable,
+        merge_iterator2::MergeIterator,
         table::{tableindex::SSTableIndex, SSTables, SSTABLE_INDEX_FNAME},
         ToyKV, ToyKVBuilder, ToyKVError, WALSync,
     };
@@ -390,6 +394,107 @@ mod tests {
         Ok(())
     }
 
+    /// Compaction should retain deleted keys as deleted.
+    #[test]
+    fn compaction_handles_deleted_keys_correctly() -> Result<(), ToyKVError> {
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        let target_size = 128 * 1024; // 128KB
+        let writes = 6000; // 6000 * 0.25kb => 1500KB
+
+        {
+            // We work directly with sstables here to have more
+            // control over the compaction. We want to ensure
+            // that all the writes make it to the sstables, so
+            // explicitly create a memtable with all the edits
+            // and write it out.
+            let mut sstables = SSTables::new(tmp_dir.path(), target_size)?;
+
+            // Test that deleted values, including some that
+            // have seen updates, don't get ressurected
+            // during compaction.
+
+            // Initial writes
+            create_sstable_from_operations(
+                &mut sstables,
+                tmp_dir.path().join("memtable1.wal"),
+                1..=writes,
+                |memtable, key| set_memtable(memtable, key, 256),
+            )?;
+            // Update some keys
+            create_sstable_from_operations(
+                &mut sstables,
+                tmp_dir.path().join("memtable2.wal"),
+                (1..=writes).step_by(4),
+                |memtable, key| set_memtable(memtable, key, 256),
+            )?;
+            // Delete updated and some original
+            create_sstable_from_operations(
+                &mut sstables,
+                tmp_dir.path().join("memtable3.wal"),
+                (1..=writes).step_by(2),
+                |memtable, key| delete_memtable(memtable, key),
+            )?;
+
+            // Check L0 has the three sstables we just wrote
+            // They are not going to be target_size as we made
+            // them up without checking their size --- that's
+            // why we have more files in L1 later, where the size
+            // was accounted for.
+            let idx_fname = tmp_dir.path().join(SSTABLE_INDEX_FNAME);
+            let new_idx = SSTableIndex::open(idx_fname.clone())?;
+            assert_eq!(new_idx.levels.l0.len(), 3, "l0 should have 3 files");
+            assert_eq!(new_idx.levels.l1.len(), 0, "l1 should be empty");
+
+            // Compact
+            let policy = SimpleCompactionPolicy::new();
+            let c_task = sstables.build_compaction_task_v2(&policy)?.unwrap();
+            let c_result = c_task.compact_v2()?;
+            sstables.try_commit_compaction_v3(policy, c_result)?;
+
+            // Check L0 is now empty and L1 has files
+            let new_idx = SSTableIndex::open(idx_fname)?;
+            assert_eq!(new_idx.levels.l0.len(), 0, "l0 should be empty");
+            assert_eq!(
+                new_idx.levels.l1.len(),
+                7, // 3000 entries (we deleted some!) @ 256bytes each
+                "l1 should have 7 files"
+            );
+
+            // Verify deletes are still deleted
+            for n in (1..=writes).step_by(2) {
+                // Overlap with first set and add new keys
+                let key = format!("key_{:04}", n).into_bytes();
+                dbg!(sstables.get(&key[..])?);
+                assert!(
+                    sstables.get(&key[..]).is_ok_and(|v| v.is_none()),
+                    "deleted items should stay deleted"
+                );
+            }
+            // Verify other items still there.
+            for n in (2..=writes).step_by(2) {
+                // Overlap with first set and add new keys
+                let key = format!("key_{:04}", n).into_bytes();
+                assert!(
+                    sstables
+                        .get(&key[..])
+                        .is_ok_and(|v| v
+                            .is_some_and(|x| matches!(x, KVValue::Some(_)))),
+                    "Other items should remain"
+                );
+            }
+
+            // Check scan also only returns half
+            let count = sstables
+                .iters(None, Bound::Unbounded)?
+                .filter(|e| e.is_ok())
+                .count();
+            assert_eq!(count, writes / 2, "Should have half of the keys");
+        }
+
+        Ok(())
+    }
+
     /// Test that compaction maintains correct order across file boundaries
     #[test]
     fn compaction_maintains_order_across_file_boundaries(
@@ -488,6 +593,31 @@ mod tests {
         Ok(entries)
     }
 
+    fn create_sstable_from_operations<F>(
+        sstables: &mut SSTables,
+        wal_path: PathBuf,
+        key_range: impl Iterator<Item = usize>,
+        operation: F,
+    ) -> Result<(), ToyKVError>
+    where
+        F: Fn(&mut Memtable, Vec<u8>) -> Result<(), ToyKVError>,
+    {
+        let mut active_memtable = Memtable::new(wal_path, WALSync::Off)?;
+
+        for n in key_range {
+            let key = format!("key_{:04}", n).into_bytes();
+            operation(&mut active_memtable, key)?;
+        }
+
+        let w = sstables.build_sstable_writer();
+        let mut mi = MergeIterator::new();
+        mi.add_iterator(active_memtable.iter());
+        let r = w.write(1000, mi)?;
+        sstables.commit_new_sstable(r)?;
+
+        Ok(())
+    }
+
     /// Helper for writing a key with a given length of value
     fn write_kv(
         mt: &ToyKV,
@@ -496,6 +626,21 @@ mod tests {
     ) -> Result<(), ToyKVError> {
         let v = vec![b'V'; v_len];
         mt.set(key.to_vec(), v)
+    }
+
+    fn set_memtable(
+        mt: &mut Memtable,
+        k: Vec<u8>,
+        v_len: usize,
+    ) -> Result<(), ToyKVError> {
+        let v = vec![b'V'; v_len];
+        mt.write(k, KVValue::Some(v))
+    }
+    fn delete_memtable(
+        mt: &mut Memtable,
+        key: Vec<u8>,
+    ) -> Result<(), ToyKVError> {
+        mt.write(key, KVValue::Deleted)
     }
 
     fn set_with_flush_if_needed_len(
@@ -508,40 +653,6 @@ mod tests {
             Err(ToyKVError::NeedFlush) => {
                 db.flush_oldest_memtable()?;
                 write_kv(db, k.into(), v_len)
-            }
-            Err(x) => Err(x),
-        }
-    }
-    /// Helper function to write k,v to db, flushing if needed
-    // fn set_with_flush_if_needed<S, T>(
-    //     db: &ToyKV,
-    //     k: S,
-    //     v: T,
-    // ) -> Result<(), ToyKVError>
-    // where
-    //     S: Into<Vec<u8>> + Clone,
-    //     T: Into<Vec<u8>> + Clone,
-    // {
-    //     match db.set(k.clone(), v.clone()) {
-    //         Ok(x) => Ok(x),
-    //         Err(ToyKVError::NeedFlush) => {
-    //             db.flush_oldest_memtable()?;
-    //             db.set(k, v)
-    //         }
-    //         Err(x) => Err(x),
-    //     }
-    // }
-
-    /// Helper to delete k from db, flushing if needed.
-    fn delete_with_flush_if_needed(
-        db: &ToyKV,
-        key: Vec<u8>,
-    ) -> Result<(), ToyKVError> {
-        match db.delete(key.clone()) {
-            Ok(x) => Ok(x),
-            Err(ToyKVError::NeedFlush) => {
-                db.flush_oldest_memtable()?;
-                db.delete(key)
             }
             Err(x) => Err(x),
         }

@@ -50,8 +50,7 @@ impl SSTableIndex {
         }
     }
 
-    /// Prepends a file to the index at a given level, and writes
-    /// the index to disk.
+    /// Writes out the index file to disk.
     pub(crate) fn write(&mut self) -> Result<(), Error> {
         // Create a backup of the file
         if self.backing_file_path.exists() {

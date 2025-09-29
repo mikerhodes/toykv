@@ -201,9 +201,9 @@ mod tests {
         mt.write(key.to_vec(), KVValue::Some(v)).unwrap();
     }
     /// Helper for deleting a key
-    fn delete_kv(mt: &mut Memtables, key: &[u8]) {
-        mt.write(key.to_vec(), KVValue::Deleted).unwrap();
-    }
+    // fn delete_kv(mt: &mut Memtables, key: &[u8]) {
+    //     mt.write(key.to_vec(), KVValue::Deleted).unwrap();
+    // }
 
     #[test]
     fn test_size_threshold() -> Result<(), ToyKVError> {

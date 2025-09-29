@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use siphasher::sip::SipHasher13;
 
+use crate::kvrecord::KVValue;
 use crate::table::builder::TableBuilder;
 use crate::table::reader::TableReader;
 use crate::table::tableindex::{SSTableIndex, SSTableIndexLevels};
@@ -240,16 +241,20 @@ impl CompactionTask {
         // we hit the target size.
         let mut i = 0;
         for entry in mi {
-            println!("New entry {}", i);
+            // println!("New entry {}", i);
             i += 1;
             let record = entry?;
-            assert!(sst.add(&record.key[..], &record.value).is_ok());
+            let add_result = match record.value {
+                KVValue::Deleted => continue,
+                KVValue::Some(_) => sst.add(&record.key[..], &record.value),
+            };
+            assert!(add_result.is_ok());
 
-            println!(
-                "{} > {}",
-                sst.estimate_size_bytes(),
-                self.target_sst_size_bytes
-            );
+            // println!(
+            //     "{} > {}",
+            //     sst.estimate_size_bytes(),
+            //     self.target_sst_size_bytes
+            // );
             if sst.estimate_size_bytes() as u64 > self.target_sst_size_bytes {
                 println!("New SST");
                 // Generate here to avoid generating an extra name
@@ -266,6 +271,8 @@ impl CompactionTask {
             l1.push(self.gen.next_sstable_fname());
             sst.write(&l1.last().unwrap())?;
         }
+
+        println!("Wrote {} entries to sstables", i);
 
         dbg!(&l1);
 
