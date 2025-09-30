@@ -8,15 +8,19 @@ application.
 Saying that, it's on its way to being not-awful:
 
 - It supports single K/V read and write, and scanning ranges.
-- It's got both memtables (with WAL) and sstables.
-- It's got a decent layering of the reading and writing code.
-- It uses bloom filters to avoid reading sstables it doesn't need to.
+- Simple compaction strategy --- compact everything in one go to a single
+  multi-file sorted run. Fine for databases of up to a few GB. Compaction
+  doesn't block reads or writes.
 - It's thread-safe.
 - It's relatively efficient with file access.
+- It uses bloom filters to avoid reading sstables it doesn't need to.
+- It's got both memtables (with WAL) and sstables.
+- It's got a decent layering of the reading and writing code.
+- 160+ tests.
 
 On the other hand, there are a few key missing features:
 
-- I still need to write compaction.
+- Improved compaction --- tiered or levelled.
 - I'd like to add a checksum --- xxhash probably --- to the sstable blocks and WAL records for data safety.
 
 And some optimisations:
