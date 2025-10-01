@@ -2,7 +2,7 @@ use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::SkipMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::{io::Error, ops::Bound};
+use std::ops::Bound;
 
 use ouroboros::self_referencing;
 
@@ -69,6 +69,10 @@ impl Memtable {
     // An opaque ID for the memtable
     pub(crate) fn id(&self) -> String {
         self.wal.wal_path().to_str().unwrap().to_string()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.memtable.map.len()
     }
 
     // Path to the WAL on disk
@@ -158,13 +162,9 @@ pub(crate) struct MemtableIterator {
 }
 
 impl MemtableIterator {
-    pub(crate) fn len(&self) -> usize {
-        self.borrow_memtable().len()
-    }
-
     fn entry_to_kvrecord(
         entry: Entry<Vec<u8>, KVValue>,
-    ) -> Result<KVRecord, Error> {
+    ) -> Result<KVRecord, ToyKVError> {
         Ok(KVRecord {
             key: entry.key().clone(),
             value: entry.value().clone(),
@@ -173,7 +173,7 @@ impl MemtableIterator {
 }
 
 impl Iterator for MemtableIterator {
-    type Item = Result<KVRecord, Error>;
+    type Item = Result<KVRecord, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.with_it_mut(|iter| match iter.next() {
@@ -241,7 +241,7 @@ mod tests {
         write_kv(&mut memtable, b"key", 15); // same value
         assert_eq!(memtable.estimated_size_bytes(), 18);
 
-        write_kv(&mut memtable, b"key", 1800); 
+        write_kv(&mut memtable, b"key", 1800);
         assert_eq!(memtable.estimated_size_bytes(), 1803);
 
         delete_kv(&mut memtable, b"key");

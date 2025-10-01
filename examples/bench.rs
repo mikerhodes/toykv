@@ -24,7 +24,13 @@ fn main() -> Result<(), ToyKVError> {
         match db.set(n.to_be_bytes().to_vec(), n.to_le_bytes().to_vec()) {
             Ok(_) => n = n + 1,
             Err(ToyKVError::NeedFlush) => {
+                let start = Instant::now();
                 db.flush_oldest_memtable()?;
+                let elapsed_time = start.elapsed();
+                println!(
+                    "Writing sstable top level took {}ms.",
+                    elapsed_time.as_millis()
+                );
             }
             Err(err) => return Err(err),
         };

@@ -1,7 +1,8 @@
+use compaction::SimpleCompactionPolicy;
 use memtables::Memtables;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
-use std::{io::Error, ops::Bound, path::Path};
+use std::sync::{Arc, RwLock};
+use std::{ops::Bound, path::Path};
 
 use error::ToyKVError;
 use kvrecord::KVValue;
@@ -10,6 +11,8 @@ use table::SSTables;
 
 mod block;
 mod blockiterator;
+mod compaction;
+mod concat_iterator;
 pub mod error;
 mod kvrecord;
 mod memtable;
@@ -31,12 +34,13 @@ pub struct ToyKVMetrics {
     pub reads: AtomicU64,
     pub writes: AtomicU64,
     pub deletes: AtomicU64,
+    pub compacts: AtomicU64,
 }
 
 pub struct ToyKV {
     /// d is the folder that the KV store owns.
     pub metrics: ToyKVMetrics,
-    state: RwLock<ToyKVState>,
+    state: Arc<RwLock<ToyKVState>>,
 }
 
 /// ToyKVState is the modifiable state of the database.
@@ -47,12 +51,16 @@ struct ToyKVState {
 
     /// memtables are the in memory tables
     memtables: Memtables,
+
+    /// Protect against running more than one
+    /// compaction from different threads.
+    compacting: bool,
 }
 
 struct ToyKVOptions {
     wal_sync: WALSync,
     wal_write_threshold: u64,
-    max_sstable_size_bytes: u64,
+    target_sst_size_bytes: u64,
 }
 
 pub struct ToyKVBuilder {
@@ -64,7 +72,7 @@ impl Default for ToyKVOptions {
         Self {
             wal_sync: WALSync::Full,
             wal_write_threshold: 250_000, // At 1kb kv pairs, 256MB
-            max_sstable_size_bytes: 256 * 1024 * 1024, // bytes
+            target_sst_size_bytes: 256 * 1024 * 1024, // bytes
         }
     }
 }
@@ -87,10 +95,10 @@ impl ToyKVBuilder {
         self
     }
 
-    // pub fn max_sstable_size(mut self, size: usize) -> Self {
-    //     self.options.max_sstable_size = size;
-    //     self
-    // }
+    pub fn target_sstable_size_bytes(mut self, size: u64) -> Self {
+        self.options.target_sst_size_bytes = size;
+        self
+    }
 
     pub fn open(self, d: &Path) -> Result<ToyKV, ToyKVError> {
         if !d.is_dir() {
@@ -101,14 +109,16 @@ impl ToyKVBuilder {
             d.to_path_buf(),
             self.options.wal_sync,
             self.options.wal_write_threshold,
-            self.options.max_sstable_size_bytes,
+            self.options.target_sst_size_bytes,
         )?;
-        let sstables = table::SSTables::new(d)?;
+        let sstables =
+            table::SSTables::new(d, self.options.target_sst_size_bytes)?;
         Ok(ToyKV {
-            state: RwLock::new(ToyKVState {
+            state: Arc::new(RwLock::new(ToyKVState {
                 memtables,
                 sstables,
-            }),
+                compacting: false,
+            })),
             metrics: Default::default(),
         })
     }
@@ -164,18 +174,13 @@ impl ToyKV {
     /// Internal method to write a KVValue to WAL and memtable
     fn write(&self, k: Vec<u8>, v: KVValue) -> Result<(), ToyKVError> {
         let mut state = self.state.write().unwrap();
-        if state.memtables.needs_flush() {
-            return Err(ToyKVError::NeedFlush);
-        }
-        match v {
-            KVValue::Deleted => {
-                self.metrics.deletes.fetch_add(1, Ordering::Relaxed);
-            }
-            KVValue::Some(_) => {
-                self.metrics.writes.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        // Save which metric to implement after successful
+        let metric = match v {
+            KVValue::Deleted => &self.metrics.deletes,
+            KVValue::Some(_) => &self.metrics.writes,
+        };
         state.memtables.write(k, v)?;
+        metric.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -183,6 +188,8 @@ impl ToyKV {
     /// Periodically call this from a background thread,
     /// or when set or delete is rejected with ToyKVError::NeedFlush.
     pub fn flush_oldest_memtable(&self) -> Result<(), ToyKVError> {
+        // TODO copy pattern from compact to allow the write out of
+        // the memtable to be done outside the locks.
         let mut state = self.state.write().unwrap();
         if state.memtables.can_flush() {
             // TODO
@@ -204,6 +211,47 @@ impl ToyKV {
             self.metrics.sst_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    // Attempt to run a compaction on the stored data. The exact
+    // compaction carried out is opaque to the caller.
+    pub fn compact(&mut self) -> Result<(), ToyKVError> {
+        // v2 compaction just compacts all existing sstables
+        // in L0 into a single L0 table. This is implemented
+        // with SimpleCompactionPolicy.
+        let policy = SimpleCompactionPolicy::new();
+
+        // Guard ensures only one compaction can happen at a time.
+        let _guard = CompactionGuard::acquire(self.state.clone())?;
+
+        // Get a table compaction task from the sstables structure.
+        let c_task = {
+            let state = self.state.read().unwrap();
+            state.sstables.build_compaction_task_v2(&policy)?
+        };
+
+        // Compaction task is safe to run outside state lock
+        let c_result = match c_task {
+            Some(c_task) => c_task.compact_v2()?,
+            None => return Ok(()), // No compaction needed
+        };
+
+        // Commit the compacted table while holding write lock.
+        {
+            let mut state = self.state.write().unwrap();
+            state.sstables.try_commit_compaction_v3(policy, c_result)?;
+        }
+
+        self.metrics.compacts.fetch_add(1, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    /// Retrieve the number of live sstables (ie, those in use, not
+    /// awaiting GC).
+    pub fn live_sstables(&self) -> usize {
+        let state = self.state.read().unwrap();
+        state.sstables.len()
     }
 
     /// Get the value for k.
@@ -252,7 +300,7 @@ impl ToyKV {
         &'a self,
         start_key: Option<&'a [u8]>,
         upper_bound: Bound<Vec<u8>>,
-    ) -> Result<KVIterator, Error> {
+    ) -> Result<KVIterator, ToyKVError> {
         let lower_bound = match start_key {
             None => Bound::Unbounded,
             Some(k) => Bound::Included(k.to_vec()),
@@ -260,16 +308,14 @@ impl ToyKV {
 
         let state = self.state.read().unwrap();
         let mt_iters = state.memtables.iters(lower_bound, upper_bound.clone());
-        let sst_iters = state.sstables.iters(start_key, upper_bound.clone())?;
+        let sst_iter = state.sstables.iters(start_key, upper_bound.clone())?;
         drop(state);
 
-        let mut m = MergeIterator::<'a>::new();
+        let mut m = MergeIterator::new();
         for t in mt_iters.into_iter() {
             m.add_iterator(t);
         }
-        for t in sst_iters.into_iter() {
-            m.add_iterator(t);
-        }
+        m.add_iterator(sst_iter);
 
         Ok(KVIterator { i: m })
     }
@@ -280,11 +326,11 @@ pub struct KV {
     pub value: Vec<u8>,
 }
 
-pub struct KVIterator<'a> {
-    i: MergeIterator<'a>,
+pub struct KVIterator {
+    i: MergeIterator,
 }
 
-impl<'a> Iterator for KVIterator<'a> {
+impl Iterator for KVIterator {
     type Item = Result<KV, ToyKVError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -304,5 +350,49 @@ impl<'a> Iterator for KVIterator<'a> {
                 },
             }
         }
+    }
+}
+
+/// CompactionGuard uses the compacting flag on state to ensure
+/// only one compaction can happen at a time. Dropping the
+/// guard allows a new compaction to start.
+struct CompactionGuard {
+    state: Arc<RwLock<ToyKVState>>,
+    active: bool,
+}
+
+impl CompactionGuard {
+    /// If returns Ok, compaction can go ahead. Otherwise, there
+    /// is an already ongoing compaction.
+    fn acquire(state: Arc<RwLock<ToyKVState>>) -> Result<Self, ToyKVError> {
+        // Test and set compacting flag while locked
+        {
+            let mut s = state.write().unwrap();
+            if s.compacting {
+                return Err(ToyKVError::CompactionAlreadyRunning);
+            }
+            s.compacting = true;
+        }
+
+        Ok(CompactionGuard {
+            state,
+            active: true,
+        })
+    }
+
+    // Allow early release
+    fn release(&mut self) {
+        if self.active {
+            if let Ok(mut state) = self.state.write() {
+                state.compacting = false;
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for CompactionGuard {
+    fn drop(&mut self) {
+        self.release();
     }
 }

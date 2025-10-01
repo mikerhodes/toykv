@@ -5,13 +5,18 @@ use std::{
     path::PathBuf,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct SSTableIndexLevels {
-    // Just one level for now
+    /// l0 is a set of files where each is a complete sorted
+    /// run: it covers the whole of the keyspace.
     pub(crate) l0: Vec<PathBuf>,
+    /// l1 is a single sorted run formed of multiple files: an
+    /// ordered set of files that each covers a sucessive,
+    /// non-overlapping portion of the keyspace.
+    pub(crate) l1: Vec<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct SSTableIndex {
     pub(crate) levels: SSTableIndexLevels,
 
@@ -32,7 +37,10 @@ impl SSTableIndex {
                 })
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                let levels = SSTableIndexLevels { l0: vec![] };
+                let levels = SSTableIndexLevels {
+                    l0: vec![],
+                    l1: vec![],
+                };
                 Ok(SSTableIndex {
                     levels,
                     backing_file_path: p,
@@ -42,13 +50,22 @@ impl SSTableIndex {
         }
     }
 
-    /// Prepends a file to the index at a given level, and writes
-    /// the index to disk.
+    /// Writes out the index file to disk.
     pub(crate) fn write(&mut self) -> Result<(), Error> {
-        fs::write(
-            &self.backing_file_path,
-            serde_json::to_string(&self.levels)?,
-        )
+        // Create a backup of the file
+        if self.backing_file_path.exists() {
+            // TODO instead check the error of fs:copy for NotFound
+            // to avoid race conditions.
+            let mut backup_path = self.backing_file_path.clone();
+            backup_path.set_extension("bak");
+            fs::copy(&self.backing_file_path, &backup_path)?;
+        }
+
+        // Atomically write new file
+        let mut tmp_path = self.backing_file_path.clone();
+        tmp_path.set_extension("tmpnew");
+        fs::write(&tmp_path, serde_json::to_string(&self.levels)?)?;
+        fs::rename(&tmp_path, &self.backing_file_path)
     }
 }
 
@@ -99,6 +116,10 @@ mod tests {
         index.levels.l0.push(path2.clone());
         index.levels.l0.push(path3.clone());
 
+        index.levels.l1.push(path3.clone());
+        index.levels.l1.push(path2.clone());
+        index.levels.l1.push(path1.clone());
+
         assert_eq!(
             index.levels.l0.len(),
             3,
@@ -107,6 +128,10 @@ mod tests {
         assert_eq!(index.levels.l0[0], path1, "First path should match");
         assert_eq!(index.levels.l0[1], path2, "Second path should match");
         assert_eq!(index.levels.l0[2], path3, "Third path should match");
+
+        assert_eq!(index.levels.l1[2], path1, "First path should match");
+        assert_eq!(index.levels.l1[1], path2, "Second path should match");
+        assert_eq!(index.levels.l1[0], path3, "Third path should match");
     }
 
     #[test]
@@ -160,8 +185,10 @@ mod tests {
         let mut index = SSTableIndex::open(index_path.clone()).unwrap();
 
         // Add specific test paths
-        index.levels.l0.push(PathBuf::from("file1.sstable"));
-        index.levels.l0.push(PathBuf::from("file2.sstable"));
+        index.levels.l0.push(PathBuf::from("l0_1.sst"));
+        index.levels.l0.push(PathBuf::from("l0_2.sst"));
+
+        index.levels.l1.push(PathBuf::from("l1_1.sst"));
 
         // Write to disk
         index.write().unwrap();
@@ -172,7 +199,8 @@ mod tests {
         // Expected JSON - this might fail if the actual format is different
         // The user asked for failing tests if there are bugs, so this test will reveal
         // the actual JSON format if it doesn't match expectations
-        let expected_json = r#"{"l0":["file1.sstable","file2.sstable"]}"#;
+        let expected_json =
+            r#"{"l0":["l0_1.sst","l0_2.sst"],"l1":["l1_1.sst"]}"#;
 
         assert_eq!(
             json_content.trim(),
@@ -197,7 +225,7 @@ mod tests {
         let json_content = fs::read_to_string(&index_path).unwrap();
 
         // Expected JSON for empty index
-        let expected_json = r#"{"l0":[]}"#;
+        let expected_json = r#"{"l0":[],"l1":[]}"#;
 
         assert_eq!(
             json_content.trim(),

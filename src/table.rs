@@ -17,26 +17,33 @@ use std::{
 const BLOOM_HASH_KEY: &[u8; 16] =
     &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
-use crate::memtable::MemtableIterator;
+use crate::{
+    compaction::{CompactionPolicy, CompactionTask, CompactionTaskResult},
+    concat_iterator::ConcatIterator,
+    error::ToyKVError,
+    merge_iterator2::MergeIterator,
+};
 use builder::TableBuilder;
-use iterator::{TableIterator, TableReader};
+use iterator::TableIterator;
+use reader::TableReader;
 use siphasher::sip::SipHasher13;
 use tableindex::SSTableIndex;
 
 use crate::kvrecord::KVValue;
 
-mod builder;
+pub(crate) mod builder;
 pub mod iterator;
-mod tableindex;
+pub mod reader;
+pub(crate) mod tableindex;
 
 pub(crate) struct SSTableWriter {
-    fname: PathBuf,
-    bloom_hasher: SipHasher13,
+    pub(crate) fname: PathBuf,
+    pub(crate) bloom_hasher: SipHasher13,
 }
 
 #[derive(Debug)]
 pub(crate) struct SSTableWriterResult {
-    fname: PathBuf,
+    pub(crate) fname: PathBuf,
 }
 
 impl SSTableWriter {
@@ -44,10 +51,33 @@ impl SSTableWriter {
     /// pass to SSTables::commit.
     pub(crate) fn write(
         self,
-        memtable_iterator: MemtableIterator,
-    ) -> Result<SSTableWriterResult, Error> {
-        let mut sst =
-            TableBuilder::new(self.bloom_hasher, memtable_iterator.len());
+        expected_n_keys: usize,
+        memtable_iterator: MergeIterator,
+    ) -> Result<SSTableWriterResult, ToyKVError> {
+        // The BloomFilter I'm using wants to know the bits_per_key
+        // and the len, it uses that to calculate the number of
+        // buckets to use --- I can see Pebble's bloom filter instead
+        // just expands the number of buckets as it goes rather
+        // than needing the number in advance. But I can't see a
+        // rust one that operates in the same way. We will have to
+        // guess a good value.
+        // Claude says that bloomfilters can vary from 10KB to several
+        // MB in size. A 256MB file full of 1KB items would contain
+        // 262144 items, which * 10 bytes for about 1% FP rate gives
+        // us 256*1024*10/8/1024 => 320KB. So we can easily assume
+        // 500byte kv pairs for about 640k. That's okay. We can
+        // use that as our guesstimate once we are using 256MB
+        // files. Probably the writer is going to have to assume
+        // that size for the compact, but for memtables we can
+        // still use the size of the memtable.
+        // To make the 256MB files, the writer will have to keep
+        // track of the length of k/v items as they are written.
+        // I don't think there's a size as yet. Looks like we
+        // should use the lower-level TableWriter to do this,
+        // rather than using this memtable writer wrapper.
+        // 256MB -> 1KB per item -> 262,144 items.
+        // 256MB -> 500 byte per item -> 524,288 items.
+        let mut sst = TableBuilder::new(self.bloom_hasher, expected_n_keys);
         for entry in memtable_iterator {
             let record = entry?;
             assert!(sst.add(&record.key[..], &record.value).is_ok());
@@ -62,32 +92,52 @@ pub(crate) struct SSTables {
     d: PathBuf,
     sstables_index: SSTableIndex,
     sstables: SSTablesReader,
+    sst_name_gen: SSTableNameGenerator,
+    target_sst_size_bytes: u64,
 
     // Ensure we share the same hashing between
     // builder and iterator for bloom filter.
     bloom_hasher: SipHasher13,
 }
 
+pub(crate) const SSTABLE_INDEX_FNAME: &str = "sstable_index.json";
+
 impl SSTables {
     /// Create a new SSTables whose files live in the directory d.
-    pub(crate) fn new(d: &Path) -> Result<SSTables, Error> {
-        let index_path = d.join("sstable_index.json");
+    pub(crate) fn new(
+        d: &Path,
+        target_sst_size_bytes: u64,
+    ) -> Result<SSTables, Error> {
+        let index_path = d.join(SSTABLE_INDEX_FNAME);
         let sstables_index = SSTableIndex::open(index_path)?;
-        let files = sstables_index.levels.l0.clone();
         let hasher = SipHasher13::new_with_key(BLOOM_HASH_KEY);
-        let sstables = SSTablesReader::new(files, hasher)?;
+        let sstables = SSTablesReader::new(&sstables_index, hasher)?;
+        let sst_name_gen = SSTableNameGenerator { d: d.to_path_buf() };
         Ok(SSTables {
             d: d.to_path_buf(),
             sstables_index,
             sstables,
+            sst_name_gen,
             bloom_hasher: hasher,
+            target_sst_size_bytes,
         })
     }
+
+    /// Get the path to the directory storing LSM files.
+    pub(crate) fn store_directory(&self) -> PathBuf {
+        self.d.clone()
+    }
+
+    /// Get the hasher to use when writing sstables.
+    pub(crate) fn bloom_hasher(&self) -> SipHasher13 {
+        self.bloom_hasher
+    }
+
     /// Build a single-use sstable writer. Use to write
     /// a single memtable using the `write` method.
     pub(crate) fn build_sstable_writer(&self) -> SSTableWriter {
         SSTableWriter {
-            fname: next_sstable_fname(self.d.as_path()),
+            fname: self.sst_name_gen.next_sstable_fname(),
             bloom_hasher: self.bloom_hasher,
         }
     }
@@ -101,17 +151,54 @@ impl SSTables {
         self.sstables_index.write()?;
 
         // Load new SSTablesReader for the new state.
-        self.sstables = SSTablesReader::new(
-            self.sstables_index.levels.l0.clone(),
+        self.sstables =
+            SSTablesReader::new(&self.sstables_index, self.bloom_hasher)?;
+
+        Ok(())
+    }
+
+    /// Build a single-use sstable compactor. Use to compact
+    /// a set of memtables using compact_v2 method.
+    pub(crate) fn build_compaction_task_v2(
+        &self,
+        policy: &impl CompactionPolicy,
+    ) -> Result<Option<CompactionTask>, ToyKVError> {
+        policy.build_task(
+            self.sst_name_gen.clone(),
             self.bloom_hasher,
-        )?;
+            &self.sstables_index,
+            self.target_sst_size_bytes,
+        )
+    }
+
+    /// Try to commit a new l0, replacing the set of
+    /// paths in c_paths (which must be the tail of l0)
+    /// with the path in c_result.
+    /// Will fail if c_paths is not the tail of current l0.
+    /// If this happens, the compaction is void and should
+    /// be retried. GC will clean up the failed compaction
+    /// path (TODO).
+    pub(crate) fn try_commit_compaction_v3(
+        &mut self,
+        c_policy: impl CompactionPolicy,
+        c_result: CompactionTaskResult,
+    ) -> Result<(), ToyKVError> {
+        let new_levels = c_policy
+            .create_updated_index(&self.sstables_index.levels, c_result)?;
+
+        self.sstables_index.levels = new_levels;
+        self.sstables_index.write()?;
+
+        // Load new SSTablesReader for the new state.
+        self.sstables =
+            SSTablesReader::new(&self.sstables_index, self.bloom_hasher)?;
 
         Ok(())
     }
 
     /// Retrieve the latest value for `k` in the on disk
     /// set of sstables.
-    pub(crate) fn get(&self, k: &[u8]) -> Result<Option<KVValue>, Error> {
+    pub(crate) fn get(&self, k: &[u8]) -> Result<Option<KVValue>, ToyKVError> {
         self.sstables.get(k)
     }
 
@@ -119,15 +206,47 @@ impl SSTables {
         &self,
         k: Option<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
-    ) -> Result<Vec<TableIterator>, Error> {
-        self.sstables.iters(k, upper_bound)
+    ) -> Result<MergeIterator, ToyKVError> {
+        self.sstables.iter(k, upper_bound)
+    }
+
+    /// Number of in-use sstables
+    /// Other sstable files may exist in the data
+    /// directory, but they are unused.
+    pub(crate) fn len(&self) -> usize {
+        // This should always be true so validate before we
+        // return the len.
+        assert!(
+            self.sstables_index.levels.l0.len()
+                == self.sstables.l0_tablereaders.len()
+        );
+        assert!(
+            self.sstables_index.levels.l1.len()
+                == self.sstables.l1_tablereaders.len()
+        );
+        self.sstables.l0_tablereaders.len()
+            + self.sstables.l1_tablereaders.len()
     }
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct SSTableNameGenerator {
+    d: PathBuf,
+}
+
+impl SSTableNameGenerator {
+    pub(crate) fn next_sstable_fname(&self) -> PathBuf {
+        let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
+        self.d.join(format!("{}.sstable", s))
+    }
+}
+
 /// Iterate entries in an on-disk SSTable.
 struct SSTablesReader {
     /// tables maintains a set of BufReaders on every sstable
     /// file in the set. This isn't that scalable.
-    tablereaders: Vec<Arc<TableReader>>,
+    l0_tablereaders: Vec<Arc<TableReader>>,
+    l1_tablereaders: Vec<Arc<TableReader>>,
     bloom_hasher: SipHasher13,
 }
 
@@ -140,37 +259,48 @@ impl SSTablesReader {
     /// for keys in the Vec of sstable files, organised newest
     /// to oldest.
     fn new(
-        sstable_files: Vec<PathBuf>,
+        sst_idx: &SSTableIndex,
         bloom_hasher: SipHasher13,
     ) -> Result<SSTablesReader, Error> {
-        let mut tablereaders: Vec<Arc<TableReader>> = vec![];
-        for p in sstable_files {
-            tablereaders.push(Arc::new(TableReader::new(p.clone())?));
+        let mut l0_tablereaders: Vec<Arc<TableReader>> = vec![];
+        for p in sst_idx.levels.l0.clone() {
+            l0_tablereaders.push(Arc::new(TableReader::new(p.clone())?));
+        }
+        // TODO for now assume that we have only one big compacted
+        // table in the l1 sorted run. (strictly this would work
+        // regardless as each file in a multi-file sorted run is
+        // non-overlapping).
+        let mut l1_tablereaders: Vec<Arc<TableReader>> = vec![];
+        for p in sst_idx.levels.l1.clone() {
+            l1_tablereaders.push(Arc::new(TableReader::new(p.clone())?));
         }
         Ok(SSTablesReader {
-            tablereaders,
+            l0_tablereaders,
+            l1_tablereaders,
             bloom_hasher,
         })
     }
 
     /// Search through the SSTables available to this reader for
     /// a key. Return an Option with its value.
-    fn get(&self, k: &[u8]) -> Result<Option<KVValue>, Error> {
+    fn get(&self, k: &[u8]) -> Result<Option<KVValue>, ToyKVError> {
         // self.tables is in the right order for scanning the sstables
         // on disk. Read each to find k. If no SSTable file contains
         // k, return None.
         // let mut tables_searched = 0;
         let hash = self.bloom_hasher.hash(k);
+
+        // First check L0
         for tr in self
-            .tablereaders
+            .l0_tablereaders
             .iter()
             .filter(|t| t.might_contain_hashed_key(hash))
         {
             // dbg!("t in tables");
             // tables_searched += 1;
-            let mut t = TableIterator::new_seeked_with_tablereader(
+            let mut t = TableIterator::new_bounded_with_tablereader(
                 tr.clone(),
-                k,
+                Bound::Included(k.to_vec()),
                 Bound::Unbounded,
             )?;
             match t.next() {
@@ -179,47 +309,75 @@ impl SSTablesReader {
                     return Ok(Some(v.value));
                 }
                 Some(Ok(_)) | None => continue, // not in this sstable
-                Some(Err(x)) => return Err(x),
+                Some(Err(x)) => return Err(x.into()),
             }
         }
+
+        // Next check L1
+        let mut ci = ConcatIterator::new(
+            self.l1_tablereaders.clone(),
+            Bound::Included(k.to_vec()),
+            Bound::Included(k.to_vec()),
+        )?;
+        match ci.next() {
+            Some(Ok(v)) if v.key == k => {
+                // dbg!(tables_searched);
+                return Ok(Some(v.value));
+            }
+            Some(Err(x)) => return Err(x),
+            _ => {} // not in L0
+        }
+
         // Otherwise, we didn't find it.
         Ok(None)
     }
 
-    fn iters(
+    /// Returns a MergeIterator for the entire set of sstables
+    /// on disk.
+    fn iter(
         &self,
         k: Option<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
-    ) -> Result<Vec<TableIterator>, Error> {
-        let mut vec = vec![];
-        for tr in &self.tablereaders {
-            let t = match k {
-                Some(k) => TableIterator::new_seeked_with_tablereader(
-                    tr.clone(),
-                    k,
-                    upper_bound.clone(),
-                )?,
-                None => TableIterator::new_with_tablereader(
-                    tr.clone(),
-                    upper_bound.clone(),
-                )?,
-            };
-            vec.push(t);
-        }
-        Ok(vec)
-    }
-}
+    ) -> Result<MergeIterator, ToyKVError> {
+        let lower_bound = match k {
+            Some(k) => Bound::Included(k.to_vec()),
+            None => Bound::Unbounded,
+        };
+        let mut mi = MergeIterator::new();
 
-fn next_sstable_fname(dir: &Path) -> PathBuf {
-    let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
-    dir.join(format!("{}.sstable", s))
+        // Add each L0 sstable individually as each is
+        // an entire sorted run.
+        for tr in &self.l0_tablereaders {
+            let t = TableIterator::new_bounded_with_tablereader(
+                tr.clone(),
+                lower_bound.clone(),
+                upper_bound.clone(),
+            )?;
+            mi.add_iterator(t);
+        }
+
+        // All the files in L1 are a single sorted run,
+        // so create a ConcatIterator to iterate them.
+        let ci = ConcatIterator::new(
+            self.l1_tablereaders.clone(),
+            lower_bound,
+            upper_bound.clone(),
+        )?;
+        mi.add_iterator(ci);
+
+        Ok(mi)
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct BlockMeta {
+    /// Start offset of block in file
     pub(crate) start_offset: u32,
+    /// End offset of block in file
     pub(crate) end_offset: u32,
+    /// First key in block
     pub(crate) first_key: Vec<u8>,
+    /// Last key in block
     pub(crate) last_key: Vec<u8>,
 }
 
@@ -267,6 +425,21 @@ impl BlockMeta {
             first_key,
             last_key,
         }
+    }
+}
+
+/// Utility Trait to gather the paths for TableIterators
+pub(crate) trait TableIteratorPaths {
+    /// Retrieve the paths on disk for the TableIterators
+    fn table_paths(&self) -> Vec<PathBuf>;
+}
+
+/// Implement TableIteratorPaths for Vec<TableIterator>
+impl TableIteratorPaths for Vec<TableIterator> {
+    fn table_paths(&self) -> Vec<PathBuf> {
+        self.iter()
+            .map(|e| e.table_path())
+            .collect::<Vec<PathBuf>>()
     }
 }
 
@@ -339,12 +512,14 @@ mod tests {
         let mut table_builder = TableBuilder::new(SipHasher13::new(), 1000);
 
         // Should work on empty table
-        let _size = table_builder.estimate_size();
+        let size = table_builder.estimate_size_bytes();
+        assert_eq!(size, 0, "empty builder should have zero size");
 
         // Should work after adding entries
         let _ = table_builder
             .add(b"test_key", &KVValue::Some(b"test_value".into()));
-        let _size = table_builder.estimate_size();
+        let size = table_builder.estimate_size_bytes();
+        assert_eq!(size, 18, "empty builder should have zero size");
     }
 
     #[test]

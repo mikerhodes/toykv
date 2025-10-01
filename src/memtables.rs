@@ -1,5 +1,4 @@
 use std::{
-    io::Error,
     iter::repeat_with,
     mem,
     path::{Path, PathBuf},
@@ -9,7 +8,8 @@ use memtable::Memtable;
 use walindex::WALIndex;
 
 use crate::{
-    error::ToyKVError, kvrecord::KVValue, memtable, walindex, WALSync,
+    error::ToyKVError, kvrecord::KVValue, memtable,
+    merge_iterator2::MergeIterator, walindex, WALSync,
 };
 
 pub(crate) struct Memtables {
@@ -27,7 +27,7 @@ pub(crate) struct Memtables {
     max_frozen_memtables: usize,
     wal_write_threshold: u64,
     wal_sync: WALSync,
-    max_memtable_size_bytes: u64,
+    target_memtable_size_bytes: u64,
 }
 
 impl Memtables {
@@ -35,7 +35,7 @@ impl Memtables {
         d: PathBuf,
         wal_sync: WALSync,
         wal_write_threshold: u64,
-        max_memtable_size_bytes: u64,
+        target_memtable_size_bytes: u64,
     ) -> Result<Self, ToyKVError> {
         let wal_index_path = d.join("wal_index.json");
         let mut wal_index = WALIndex::open(wal_index_path)?;
@@ -67,7 +67,7 @@ impl Memtables {
             max_frozen_memtables: 1,
             wal_write_threshold,
             wal_sync,
-            max_memtable_size_bytes,
+            target_memtable_size_bytes,
         })
     }
     pub(crate) fn write(
@@ -75,6 +75,12 @@ impl Memtables {
         k: Vec<u8>,
         v: KVValue,
     ) -> Result<(), ToyKVError> {
+        // TODO rollover to the frozen table if the new kv would
+        // take us over the threshold --- same for frozen table
+        // full.
+        if self.needs_flush() {
+            return Err(ToyKVError::NeedFlush);
+        }
         if self.active_memtable_full() {
             let new_wal_path = new_wal_path(&self.d);
             self.wal_index.set_active_wal(&new_wal_path)?;
@@ -107,7 +113,7 @@ impl Memtables {
     fn active_memtable_full(&self) -> bool {
         let am = &self.active_memtable;
         am.wal_writes() >= self.wal_write_threshold
-            || am.estimated_size_bytes() > self.max_memtable_size_bytes
+            || am.estimated_size_bytes() > self.target_memtable_size_bytes
     }
 
     /// Return true if there are no more spaces for frozen memtables
@@ -120,10 +126,12 @@ impl Memtables {
     pub(crate) fn write_oldest_memtable(
         &self,
         w: crate::table::SSTableWriter,
-    ) -> Result<(crate::table::SSTableWriterResult, String), Error> {
+    ) -> Result<(crate::table::SSTableWriterResult, String), ToyKVError> {
         assert!(!self.frozen_memtables.is_empty(), "frozen_memtables empty!");
         let ft = self.frozen_memtables.last().unwrap();
-        let r = w.write(ft.iter())?;
+        let mut mt = MergeIterator::new();
+        mt.add_iterator(ft.iter());
+        let r = w.write(ft.len(), mt)?;
         Ok((r, ft.id()))
     }
 
@@ -179,4 +187,55 @@ impl Memtables {
 fn new_wal_path(dir: &Path) -> PathBuf {
     let s: String = repeat_with(fastrand::alphanumeric).take(16).collect();
     dir.join(format!("{}.wal", s))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{error::ToyKVError, kvrecord::KVValue};
+
+    use super::Memtables;
+
+    /// Helper for writing a key with a given length of value
+    fn write_kv(mt: &mut Memtables, key: &[u8], v_len: usize) {
+        let v = vec![b'V'; v_len];
+        mt.write(key.to_vec(), KVValue::Some(v)).unwrap();
+    }
+    /// Helper for deleting a key
+    // fn delete_kv(mt: &mut Memtables, key: &[u8]) {
+    //     mt.write(key.to_vec(), KVValue::Deleted).unwrap();
+    // }
+
+    #[test]
+    fn test_size_threshold() -> Result<(), ToyKVError> {
+        let d = tempfile::tempdir().expect("Failed to create temp dir");
+
+        let mut mts = Memtables::new(
+            d.into_path(),
+            crate::WALSync::Off,
+            2_500_000, // high enough not to be reached
+            1024,      // tiny 1KB target sstables size
+        )?;
+
+        // TODO, potentially want this to fail instead,
+        // when the new write would take us over the
+        // threshold.
+        // write_kv(&mut mts, b"key1", 513);
+        // write_kv(&mut mts, b"key2", 513);
+        // assert!(mts.active_memtable_full());
+        // assert!(mts.frozen_memtables_full());
+
+        // Current behaviour is that "full" is _after_
+        // we've already passed the target. I'm not
+        // sure this is the right approach, see above.
+        write_kv(&mut mts, b"key1", 513);
+        write_kv(&mut mts, b"key2", 513);
+        assert!(mts.active_memtable_full());
+        assert!(!mts.frozen_memtables_full());
+        write_kv(&mut mts, b"key1", 513);
+        write_kv(&mut mts, b"key2", 513);
+        assert!(mts.active_memtable_full());
+        assert!(mts.frozen_memtables_full());
+
+        Ok(())
+    }
 }
