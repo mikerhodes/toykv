@@ -195,7 +195,7 @@ impl ToyKV {
             // TODO
             // Later, add thread that periodically checks
             // for frozen memtables and flushes; meaning the
-            // rejected write is backpressure.
+            // rejected write is back-pressure.
             // Add vec of frozen tables, so user can tune
             // for the write rate vs. memory used?
             let w = state.sstables.build_sstable_writer();
