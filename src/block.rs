@@ -195,31 +195,30 @@ impl Entry {
     fn size(&self) -> usize {
         return 2 + self.key.len() + 2 + self.value.len();
     }
+
     pub(crate) fn decode(data: &[u8]) -> Entry {
-        let mut u16buf: [u8; 2] = [0u8; 2];
-        let mut c = Cursor::new(data);
+        let (key_len, rest) = data.split_at(size_of::<u16>());
+        let key_len = u16::from_be_bytes([key_len[0], key_len[1]]);
 
-        assert!(matches!(c.read(&mut u16buf), Ok(2)));
-        let keylen = u16::from_be_bytes(u16buf);
-        let mut key = vec![0; keylen as usize];
-        assert!(matches!(c.read(&mut key), Ok(n) if n == keylen as usize));
+        let (key, rest) = rest.split_at(key_len as usize);
+        let key = key.to_vec();
 
-        assert!(matches!(c.read(&mut u16buf), Ok(2)));
-        let valuelen = u16::from_be_bytes(u16buf);
-        let mut value = vec![0; valuelen as usize];
-        assert!(matches!(c.read(&mut value), Ok(n) if n == valuelen as usize));
+        let (value_len, rest) = rest.split_at(size_of::<u16>());
+        let value_len = u16::from_be_bytes([value_len[0], value_len[1]]);
+
+        assert_eq!(rest.len(), value_len as usize, "value not right length");
+
+        let value = rest.to_vec();
 
         Entry { key, value }
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut buf: Vec<u8> = vec![];
-
-        buf.extend((self.key.len() as u16).to_be_bytes());
-        buf.extend(self.key.clone());
-        buf.extend((self.value.len() as u16).to_be_bytes());
-        buf.extend(self.value.clone());
-
+        let mut buf = Vec::with_capacity(self.size());
+        buf.extend_from_slice(&(self.key.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&self.key);
+        buf.extend_from_slice(&(self.value.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&self.value);
         buf
     }
 }
