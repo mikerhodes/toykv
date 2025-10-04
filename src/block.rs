@@ -3,27 +3,26 @@
 // https://skyzh.github.io/mini-lsm/week1-03-block.html.
 // These blocks are later formed into sstables.
 //
-// The block encoding format in our course is as follows:
-//
-// -----------------------------------------------------------------------------
-// |         Data Section      |         Offset Section      |      Extra      |
-// -----------------------------------------------------------------------------
-// | Entry #1 | ... | Entry #N | Offset #1 | ... | Offset #N | num_of_elements |
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// |  Data Section |         Offset Section      |      Extra                 |
+// ----------------------------------------------------------------------------
+// | Entry 1 | ... | Offset #1 | ... | Offset #N | num_of_elements | u64 hash |
+// ----------------------------------------------------------------------------
 //
 // Each entry is a key-value pair.
+// Hash is over the whole block up to the hash itself.
 //
-// -----------------------------------------------------------------------
-// |                           Entry #1                            | ... |
-// -----------------------------------------------------------------------
-// | key_len (2B) | key (keylen) | value_len (2B) | value (varlen) | ... |
-// -----------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// |                           Entry #1                              | ... |
+// -------------------------------------------------------------------------
+// | key_len (2B) | key (key_len) | value_len (2B) | value (var_len) | ... |
+// -------------------------------------------------------------------------
 //
 // Key length and value length are both 2 bytes,
 // which means their maximum lengths are 65535.
 // (Internally stored as u16)
 
-use std::io::{Cursor, Read};
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::kvrecord::KVValue;
 
@@ -138,32 +137,36 @@ pub(crate) struct Block {
 }
 impl Block {
     pub(crate) fn decode(data: &[u8]) -> Block {
-        assert!(data.len() >= 4);
         // A block is a series of encoded entries,
-        // followed by the offsets of each entry (as u16),
-        // followed by the total number of entries (as u32).
-        // So:
-        // 1. Find the number of entries
-        // 2. Use that to pull off the offsets.
-        // 3. Then we can separate out the data and the offsets,
-        //    and return as a Block (we'll need to write an iterator
-        //    to get at the entries).
-        let n_entries_bytes: [u8; 4] =
-            data[data.len() - 4..].try_into().unwrap();
-        let n_entries = u32::from_be_bytes(n_entries_bytes);
+        // followed by the offsets of each entry (as a block of u16 values),
+        // followed by the total number of entries (a u32).
+        // followed by the checksum hash (a u64)
 
-        // Ensure data length is at least enough for n_entries + offsets
-        let trailers_size: usize = (4 + n_entries * 2) as usize;
-        assert!(data.len() >= trailers_size);
-        let offsets_bytes: &[u8] =
-            &data[data.len() - trailers_size..data.len() - 4];
+        // Read the hash and check against the hash calculated from rest.
+        let (rest, hash) = data.split_at(data.len() - size_of::<u64>());
+        let hash = u64::from_be_bytes(hash.try_into().unwrap());
+        let calculated_hash = Block::hash(rest);
+        assert_eq!(hash, calculated_hash, "corrupted data!");
+
+        // Next field from the end is the number of offsets.
+        let (rest, n_entries) = rest.split_at(rest.len() - size_of::<u32>());
+        let n_entries = u32::from_be_bytes(n_entries.try_into().unwrap());
+        let n_entries = n_entries as usize;
+
+        // Next data block is the run of u16 offsets themselves.
+        let (rest, offsets) =
+            rest.split_at(rest.len() - (n_entries * size_of::<u16>()));
+        let offsets = offsets
+            .chunks_exact(2) // Chunk into 2-byte u16s
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect();
+
+        // Remaining data is the key-value data.
+        let kv_data = rest.to_vec();
 
         Block {
-            offsets: offsets_bytes
-                .chunks_exact(2)
-                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
-                .collect(),
-            data: data[0..data.len() - trailers_size].to_vec(),
+            offsets,
+            data: kv_data,
         }
     }
 
@@ -174,6 +177,7 @@ impl Block {
     /// The sstable file maintains an index of block offsets in its
     /// metadata to account for this variability.
     pub(crate) fn encode(&self) -> Vec<u8> {
+        // TODO optimise write as we do in Entry
         let mut buf: Vec<u8> = vec![];
 
         buf.extend(self.data.clone());
@@ -182,7 +186,13 @@ impl Block {
         }
         buf.extend((self.offsets.len() as u32).to_be_bytes());
 
+        buf.extend(Block::hash(&buf).to_be_bytes());
+
         buf
+    }
+
+    fn hash(data: &[u8]) -> u64 {
+        xxh3_64(&data[..])
     }
 }
 
@@ -558,8 +568,9 @@ mod tests {
         // 2 entries * 14 bytes each = 28 bytes of entry data
         // 2 offsets * 2 bytes each = 4 bytes of offset data
         // 1 num_entries * 4 bytes = 4 bytes of num_entries
-        // Total = 36 bytes
-        assert_eq!(encoded.len(), 36);
+        // 1 u64 hash = 8 bytes
+        // Total = 44 bytes
+        assert_eq!(encoded.len(), 44);
 
         // Verify that the encoded data starts with the entry data
         assert_eq!(&encoded[0..block.data.len()], &block.data);
@@ -616,7 +627,8 @@ mod tests {
 
         // Test encoding
         let encoded = block.encode();
-        assert_eq!(encoded.len(), block.data.len() + (6 * 2) + 4); // data + 6 offsets * 2 bytes each + 4 bytes for num_entries
+        assert_eq!(encoded.len(), block.data.len() + (6 * 2) + 4 + 8);
+        // data + 6 offsets * 2 bytes each + 4 bytes for num_entries + 8 byte xxhash
     }
 
     #[test]
@@ -626,9 +638,21 @@ mod tests {
         let empty_block = empty_builder.build();
         let empty_encoded = empty_block.encode();
 
-        // Empty block should have 4 bytes for num_entries = 0
-        assert_eq!(empty_encoded.len(), 4);
-        assert_eq!(empty_encoded, &0u32.to_be_bytes());
+        // Empty block should have 4 bytes num entries and 8 byte hash
+        assert_eq!(empty_encoded.len(), 12);
+        assert_eq!(&empty_encoded[..4], &0u32.to_be_bytes());
+        assert_eq!(
+            u64::from_be_bytes(empty_encoded[4..12].try_into().unwrap()),
+            5238470482016868669u64
+        );
+
+        // Extract the number of entries from an encoded block
+        let n_entries = |buf: &[u8]| -> u32 {
+            let offset = buf.len() - size_of::<u32>() - size_of::<u64>();
+            u32::from_be_bytes(
+                buf[offset..offset + size_of::<u32>()].try_into().unwrap(),
+            )
+        };
 
         // Test single entry block
         let mut single_builder = BlockBuilder::new();
@@ -639,8 +663,7 @@ mod tests {
         let single_encoded = single_block.encode();
 
         // Extract num_entries from the end
-        let num_entries_start = single_encoded.len() - 4;
-        assert_eq!(&single_encoded[num_entries_start..], &1u32.to_be_bytes());
+        assert_eq!(n_entries(&single_encoded), 1u32);
 
         // Test multiple entries block
         let mut multi_builder = BlockBuilder::new();
@@ -656,11 +679,7 @@ mod tests {
         let multi_encoded = multi_block.encode();
 
         // Extract num_entries from the end
-        let num_entries_start = multi_encoded.len() - 4;
-        assert_eq!(
-            &multi_encoded[num_entries_start..],
-            (num_test_entries as u32).to_be_bytes()
-        );
+        assert_eq!(n_entries(&multi_encoded), num_test_entries);
 
         // Test with deleted entries
         let mut deleted_builder = BlockBuilder::new();
@@ -675,8 +694,7 @@ mod tests {
         let deleted_encoded = deleted_block.encode();
 
         // Extract num_entries from the end
-        let num_entries_start = deleted_encoded.len() - 4;
-        assert_eq!(&deleted_encoded[num_entries_start..], &3u32.to_be_bytes());
+        assert_eq!(n_entries(&deleted_encoded), 3u32);
     }
 
     // Block::decode tests
@@ -878,6 +896,9 @@ mod tests {
         // Number of entries
         data.extend(2u32.to_be_bytes());
 
+        // And the hash
+        data.extend(Block::hash(&data).to_be_bytes());
+
         let decoded_block = Block::decode(&data);
 
         assert_eq!(decoded_block.offsets.len(), 2);
@@ -923,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed")]
+    #[should_panic(expected = "attempt to subtract with overflow")]
     fn test_block_decode_insufficient_data_for_num_entries() {
         // Data too small to contain the 4-byte num_entries field
         let data = vec![0u8, 1u8, 2u8]; // Only 3 bytes
@@ -931,25 +952,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed")]
+    #[should_panic(expected = "attempt to subtract with overflow")]
     fn test_block_decode_insufficient_data_for_offsets() {
         // Data claims to have entries but doesn't have enough space for offsets
         let mut data = Vec::new();
         data.extend(b"some_entry_data");
         data.extend(20u32.to_be_bytes());
+        data.extend(Block::hash(&data).to_be_bytes());
         // Claims 10 entries, so data needs to be 4 + 20*2 = 44 bytes
         // but it's shorter than that.
         Block::decode(&data);
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed")]
+    #[should_panic(expected = "attempt to subtract with overflow")]
     fn test_block_decode_inconsistent_trailer_size() {
         // Create data where num_entries claims more entries than we have space for
         let mut data = Vec::new();
         data.extend(b"short");
         data.extend(0u16.to_be_bytes()); // One offset
         data.extend(1000u32.to_be_bytes()); // Claims 1000 entries but we only have 1 offset
+        data.extend(Block::hash(&data).to_be_bytes());
 
         Block::decode(&data);
     }
