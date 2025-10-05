@@ -146,7 +146,7 @@ impl Block {
         let (rest, hash) = data.split_at(data.len() - size_of::<u64>());
         let hash = u64::from_be_bytes(hash.try_into().unwrap());
         let calculated_hash = Block::hash(rest);
-        assert_eq!(hash, calculated_hash, "corrupted data!");
+        assert_eq!(hash, calculated_hash, "corrupted block!");
 
         // Next field from the end is the number of offsets.
         let (rest, n_entries) = rest.split_at(rest.len() - size_of::<u32>());
@@ -760,6 +760,41 @@ mod tests {
         assert_eq!(decoded_block.offsets[0], 0);
         assert_eq!(decoded_block.offsets[1], 14); // 2+4+2+6 = 14
         assert_eq!(decoded_block.offsets[2], 28); // 14+14 = 28
+    }
+
+    #[test]
+    #[should_panic(expected = "corrupted block!")]
+    fn test_block_checksum_failure() {
+        // Create a block with multiple entries and test round-trip
+        let mut builder = BlockBuilder::new();
+        builder
+            .add(b"key1", &KVValue::Some(b"value1".into()))
+            .unwrap();
+        builder
+            .add(b"key2", &KVValue::Some(b"value2".into()))
+            .unwrap();
+        builder
+            .add(b"key3", &KVValue::Some(b"value3".into()))
+            .unwrap();
+        let original_block = builder.build();
+        let encoded = original_block.encode();
+
+
+        // Change a byte to cause a checksum failure.
+        // TODO decode needs to return a Result<> so
+        // we can check whether it succeeds, rather
+        // than panicking.
+        // Block::decode(&encoded);
+
+        // First, change a value in the data
+        let mut t = encoded.clone();
+        t[3] = 0;
+        Block::decode(&t);
+
+        let mut t = encoded.clone();
+        let len = t.len();
+        t[len - 3] = 0;
+        Block::decode(&encoded);
     }
 
     #[test]

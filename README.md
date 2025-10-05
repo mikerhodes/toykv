@@ -11,6 +11,7 @@ Saying that, it's on its way to being not-awful:
 - Simple compaction strategy --- compact everything in one go to a single
   multi-file sorted run. Fine for databases of up to a few GB. Compaction
   doesn't block reads or writes.
+- Blocks have an [xxhash] checksum to ensure data integrity.
 - It's thread-safe.
 - It's relatively efficient with file access.
 - It uses bloom filters to avoid reading sstables it doesn't need to.
@@ -21,10 +22,11 @@ Saying that, it's on its way to being not-awful:
 On the other hand, there are a few key missing features:
 
 - Improved compaction --- tiered or levelled.
-- I'd like to add a checksum --- xxhash probably --- to the sstable blocks and WAL records for data safety.
 
 And some optimisations:
 
 - It'd be good to compress sstable blocks, or use key prefix compression.
 
 Overall, with all those things, it would be a good demonstration LSM store; as for production use-cases, I don't (yet) have the need to take it to that level of robustness.
+
+[xxhash]: https://xxhash.com/
