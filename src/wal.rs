@@ -16,7 +16,7 @@ use crate::{
 The WAL is a simple sequence of records written to a file, written in the
 order they were inserted into toykv.
 
-The main interesting item is the seq, which is expected to incrase by 1
+The main interesting item is the seq, which is expected to increase by 1
 with each item. A u32 allows for 4,294,967,295 records. We should've
 flushed the associated memtable to disk long before we get that
 far.
