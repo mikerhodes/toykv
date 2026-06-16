@@ -3,7 +3,9 @@
 An LSM key-value store created so I could learn the basics of writing an LSM (and rust).
 
 It's purely a learning exercise and not suited to being used in any real world
-application.
+application. As I've gained more experience in Rust over that last couple of
+years, it's also clear that some of the earlier parts (eg, WAL) could do with a
+tidying up.
 
 Saying that, it's on its way to being not-awful:
 
