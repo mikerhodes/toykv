@@ -78,40 +78,22 @@ impl KVRecord {
 
         Ok(Some(kv))
     }
-}
-
-#[derive(Debug)]
-/// Write-optimised version of KVRecord. It uses references for
-/// data to avoid copying.
-pub(crate) struct KVWriteRecord<'a> {
-    // magic: u8,
-    // keylen: u16,
-    // valuelen: u32,
-    pub(crate) key: &'a [u8],
-    pub(crate) value: &'a KVValue,
-}
-impl<'a> KVWriteRecord<'a> {
-    /// Serialise the KVWriteRecord to a buffer.
-    ///
-    /// We choose to produce a buffer here rather than use a write_one
-    /// approach to allow KVRecord data to be embedded into other
-    /// serialised formats more easily.
-    pub(crate) fn serialize(&self) -> Vec<u8> {
+    pub(crate) fn serialize(k: &[u8], v: &KVValue) -> Vec<u8> {
         let mut buf = Vec::<u8>::new();
         buf.push(KV_MAGIC);
         buf.push(KV_VERSION);
-        buf.extend((self.key.len() as u16).to_be_bytes());
+        buf.extend((k.len() as u16).to_be_bytes());
 
-        match self.value {
+        match v {
             KVValue::Deleted => {
                 buf.extend((0 as u32).to_be_bytes()); // no value
                 buf.push(KV_DELETED);
-                buf.extend(self.key);
+                buf.extend(k);
             }
             KVValue::Some(v) => {
                 buf.extend((v.len() as u32).to_be_bytes());
                 buf.push(KV_LIVE);
-                buf.extend(self.key);
+                buf.extend(k);
                 buf.extend(v);
             }
         }

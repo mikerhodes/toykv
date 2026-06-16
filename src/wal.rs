@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    kvrecord::{KVRecord, KVValue, KVWriteRecord},
+    kvrecord::{KVRecord, KVValue},
     memtable::MemtableMap,
     ToyKVError, WALSync,
 };
@@ -229,7 +229,7 @@ impl WALRecord {
         buf.push(WAL_MAGIC);
         buf.extend(seq.to_be_bytes());
         buf.push(OP_SET);
-        buf.extend(KVWriteRecord { key, value }.serialize());
+        buf.extend(KVRecord::serialize(key, value));
         w.write_all(&buf)?;
 
         Ok(())
