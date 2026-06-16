@@ -99,27 +99,19 @@ impl WAL {
 
         let mut cnt = 0;
         let mut last_read_seq = 0;
-        while bytes.stream_position()? < size {
-            // dbg!(bytes.stream_position()?);
-            let rec = WALRecord::read_one(&mut bytes)?;
-            // dbg!(&rec);
-            match rec {
-                Some(wr) => {
-                    if wr.seq != self.nextseq {
-                        return Err(ToyKVError::BadWALSeq {
-                            expected: self.nextseq,
-                            actual: wr.seq,
-                        });
-                    }
-                    assert_eq!(wr.op, OP_SET, "Unexpected op code");
-                    memtable.write(wr.key, wr.value);
-                    last_read_seq = wr.seq;
-                    self.nextseq = wr.seq + 1;
-                    self.wal_writes += 1;
-                    cnt += 1;
-                }
-                None => break, // assume we hit the end of the WAL file
-            };
+        while let Some(wr) = WALRecord::read_one(&mut bytes)? {
+            if wr.seq != self.nextseq {
+                return Err(ToyKVError::BadWALSeq {
+                    expected: self.nextseq,
+                    actual: wr.seq,
+                });
+            }
+            assert_eq!(wr.op, OP_SET, "Unexpected op code");
+            memtable.write(wr.key, wr.value);
+            last_read_seq = wr.seq;
+            self.nextseq = wr.seq + 1;
+            self.wal_writes += 1;
+            cnt += 1;
         }
 
         println!(
@@ -172,7 +164,7 @@ impl WAL {
             return Err(ToyKVError::BadWALState);
         }
         // Drop our writer so it closes
-        self.f = None;
+        drop(self.f.take());
         fs::remove_file(self.wal_path.as_path())?;
         Ok(())
     }
@@ -191,8 +183,16 @@ struct WALRecord {
 impl WALRecord {
     /// Read a single WAL record from a WAL file (or other Read struct).
     fn read_one<T: Read>(r: &mut T) -> Result<Option<WALRecord>, Error> {
+        // If we hit Eof with header read, it just means that there are
+        // no more records to read.
         let mut header = [0u8; 6];
-        r.read_exact(&mut header)?;
+        match r.read_exact(&mut header) {
+            Ok(_) => {}
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                _ => return Err(e),
+            },
+        }
 
         // This might be clearer using byteorder and a reader
         let magic = header[0];
@@ -200,22 +200,16 @@ impl WALRecord {
         let seq = u32::from_be_bytes(header[1..5].try_into().unwrap());
         let op = header[5];
 
-        let kv = KVRecord::read_one(r)?;
-
-        match kv {
-            None => Ok(None),
-            Some(kv) => {
-                let wr = WALRecord {
-                    seq,
-                    op,
-                    key: kv.key,
-                    value: kv.value,
-                };
-
-                // println!("Read WAL record: {:?}", wr);
-
-                Ok(Some(wr))
-            }
+        match KVRecord::read_one(r) {
+            Ok(None) => Ok(None),
+            Ok(Some(kv)) => Ok(Some(WALRecord {
+                seq,
+                op,
+                key: kv.key,
+                value: kv.value,
+            })),
+            // We expected a record here, real error
+            Err(e) => Err(e),
         }
     }
 
