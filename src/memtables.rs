@@ -210,7 +210,7 @@ mod tests {
         let d = tempfile::tempdir().expect("Failed to create temp dir");
 
         let mut mts = Memtables::new(
-            d.into_path(),
+            d.path().to_path_buf(),
             crate::WALSync::Off,
             2_500_000, // high enough not to be reached
             1024,      // tiny 1KB target sstables size
