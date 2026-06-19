@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufReader, Error, Read, Seek, Write},
+    io::{BufReader, Error, Read, Write},
     path::PathBuf,
 };
 
@@ -140,9 +140,8 @@ impl WAL {
         let file = self.f.as_mut().unwrap();
         WALRecord::write_one(file, seq, key, value)?;
         self.wal_writes += 1;
-        // file.flush()?;
         if self.sync == WALSync::Full {
-            file.sync_all()?;
+            self.sync()?;
         }
 
         // dbg!(self.wal_writes);
@@ -166,6 +165,14 @@ impl WAL {
         // Drop our writer so it closes
         drop(self.f.take());
         fs::remove_file(self.wal_path.as_path())?;
+        Ok(())
+    }
+
+    /// Sync the WAL file to disk
+    pub(crate) fn sync(&mut self) -> Result<(), ToyKVError> {
+        let file = self.f.as_mut().unwrap();
+        file.flush()?;
+        file.sync_all()?;
         Ok(())
     }
 }

@@ -8,7 +8,7 @@ fn compact_sanity_check() -> Result<(), ToyKVError> {
 
     {
         let mut db = ToyKVBuilder::new()
-            .wal_sync(WALSync::Off)
+            .wal_sync(WALSync::Manual)
             .wal_write_threshold(100)
             .open(tmp_dir.path())?;
         db.compact()?;
@@ -26,7 +26,7 @@ fn compact_lifecycle_test() -> Result<(), ToyKVError> {
     let writes = 2500i64;
     {
         let mut db = ToyKVBuilder::new()
-            .wal_sync(WALSync::Off)
+            .wal_sync(WALSync::Manual)
             .wal_write_threshold(100)
             .open(tmp_dir.path())?;
 
@@ -130,7 +130,7 @@ fn compact_lifecycle_test() -> Result<(), ToyKVError> {
     // Rewrite the same values --- should create expected_sstables again.
     {
         let db = ToyKVBuilder::new()
-            .wal_sync(WALSync::Off)
+            .wal_sync(WALSync::Manual)
             .wal_write_threshold(100)
             .open(tmp_dir.path())?;
         for n in 1..(writes + 1) {

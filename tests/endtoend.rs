@@ -73,7 +73,7 @@ fn write_and_read_sstable() -> Result<(), ToyKVError> {
     let writes = 2500i64;
 
     let mut db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -118,7 +118,7 @@ fn deletes() -> Result<(), ToyKVError> {
     let writes = 2500i64;
 
     let mut db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -183,7 +183,7 @@ fn operations_blocked_after_shutdown() -> Result<(), ToyKVError> {
     let writes = 2500i64;
 
     let mut db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -221,7 +221,7 @@ fn scan() -> Result<(), ToyKVError> {
     let writes = 2500i64;
 
     let mut db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -272,7 +272,7 @@ fn scan_seek_key_check_next() -> Result<(), ToyKVError> {
     let writes = 2500i64;
 
     let mut db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -326,7 +326,7 @@ fn scan_on_reopen() -> Result<(), ToyKVError> {
     let writes = 2500i64;
 
     let mut db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -366,7 +366,7 @@ fn scan_with_upper_bound() -> Result<(), ToyKVError> {
 
     {
         let mut db = ToyKVBuilder::new()
-            .wal_sync(WALSync::Off)
+            .wal_sync(WALSync::Manual)
             .wal_write_threshold(1000)
             .open(tmp_dir.path())?;
 
@@ -416,7 +416,7 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
     let writes = 2500i64;
 
     let mut db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -605,7 +605,7 @@ fn delete_already_deleted_key() -> Result<(), ToyKVError> {
 fn overwrite_same_key_multiple_times() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
     let db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -625,7 +625,7 @@ fn overwrite_same_key_multiple_times() -> Result<(), ToyKVError> {
 fn wal_threshold_boundary() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
     let db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -680,7 +680,7 @@ fn scan_empty_database() -> Result<(), ToyKVError> {
 fn scan_database_with_only_deleted_items() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
     let db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -711,7 +711,7 @@ fn scan_returns_correct_values() -> Result<(), ToyKVError> {
     let n_items = 2500;
     let tmp_dir = tempfile::tempdir().unwrap();
     let db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -801,7 +801,7 @@ fn persistence_after_restart_with_deletes() -> Result<(), ToyKVError> {
 fn mixed_operations_across_sstable_flushes() -> Result<(), ToyKVError> {
     let tmp_dir = tempfile::tempdir().unwrap();
     let db = ToyKVBuilder::new()
-        .wal_sync(WALSync::Off)
+        .wal_sync(WALSync::Manual)
         .wal_write_threshold(1000)
         .open(tmp_dir.path())?;
 
@@ -900,7 +900,7 @@ fn operations_with_large_batch_across_restart() -> Result<(), ToyKVError> {
 
     {
         let mut db = ToyKVBuilder::new()
-            .wal_sync(WALSync::Off)
+            .wal_sync(WALSync::Manual)
             .wal_write_threshold(1000)
             .open(tmp_dir.path())?;
 
@@ -981,7 +981,7 @@ fn test_11397_wal_records_bug() -> Result<(), ToyKVError> {
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let mut db = ToyKVBuilder::new()
-            .wal_sync(toykv::WALSync::Off)
+            .wal_sync(toykv::WALSync::Manual)
             .wal_write_threshold(12000)
             .open(tmp_dir.path())?;
 
@@ -1008,7 +1008,7 @@ fn test_11397_wal_records_bug() -> Result<(), ToyKVError> {
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let mut db = ToyKVBuilder::new()
-            .wal_sync(toykv::WALSync::Off)
+            .wal_sync(toykv::WALSync::Manual)
             .wal_write_threshold(12000)
             .open(tmp_dir.path())?;
 

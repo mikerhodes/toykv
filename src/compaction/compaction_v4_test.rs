@@ -29,7 +29,7 @@ mod tests {
 
         {
             let mut db = ToyKVBuilder::new()
-                .wal_sync(WALSync::Off)
+                .wal_sync(WALSync::Manual)
                 .wal_write_threshold(HIGH_WRITE_THRESHOLD)
                 .target_sstable_size_bytes(target_size)
                 .open(tmp_dir.path())?;
@@ -95,7 +95,7 @@ mod tests {
 
         {
             let mut db = ToyKVBuilder::new()
-                .wal_sync(WALSync::Off)
+                .wal_sync(WALSync::Manual)
                 .wal_write_threshold(HIGH_WRITE_THRESHOLD)
                 .target_sstable_size_bytes(target_size)
                 .open(tmp_dir.path())?;
@@ -152,7 +152,7 @@ mod tests {
 
         {
             let mut db = ToyKVBuilder::new()
-                .wal_sync(WALSync::Off)
+                .wal_sync(WALSync::Manual)
                 .wal_write_threshold(HIGH_WRITE_THRESHOLD)
                 .target_sstable_size_bytes(target_size)
                 .open(tmp_dir.path())?;
@@ -213,7 +213,7 @@ mod tests {
 
         {
             let mut db = ToyKVBuilder::new()
-                .wal_sync(WALSync::Off)
+                .wal_sync(WALSync::Manual)
                 .wal_write_threshold(HIGH_WRITE_THRESHOLD)
                 .wal_write_threshold(2) // Force flush with minimal data
                 .open(tmp_dir.path())?;
@@ -258,7 +258,7 @@ mod tests {
 
         {
             let mut db = ToyKVBuilder::new()
-                .wal_sync(WALSync::Off)
+                .wal_sync(WALSync::Manual)
                 .wal_write_threshold(HIGH_WRITE_THRESHOLD)
                 .target_sstable_size_bytes(target_size)
                 .open(tmp_dir.path())?;
@@ -328,7 +328,7 @@ mod tests {
 
         {
             let mut db = ToyKVBuilder::new()
-                .wal_sync(WALSync::Off)
+                .wal_sync(WALSync::Manual)
                 .wal_write_threshold(HIGH_WRITE_THRESHOLD)
                 .target_sstable_size_bytes(target_size)
                 .open(tmp_dir.path())?;
@@ -507,7 +507,7 @@ mod tests {
 
         {
             let mut db = ToyKVBuilder::new()
-                .wal_sync(WALSync::Off)
+                .wal_sync(WALSync::Manual)
                 .wal_write_threshold(HIGH_WRITE_THRESHOLD)
                 .target_sstable_size_bytes(target_size)
                 .open(tmp_dir.path())?;
@@ -602,7 +602,7 @@ mod tests {
     where
         F: Fn(&mut Memtable, Vec<u8>) -> Result<(), ToyKVError>,
     {
-        let mut active_memtable = Memtable::new(wal_path, WALSync::Off)?;
+        let mut active_memtable = Memtable::new(wal_path, WALSync::Manual)?;
 
         for n in key_range {
             let key = format!("key_{:04}", n).into_bytes();

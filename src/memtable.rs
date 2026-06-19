@@ -80,6 +80,10 @@ impl Memtable {
         self.wal.wal_path().clone()
     }
 
+    pub(crate) fn wal_sync(&mut self) -> Result<(), ToyKVError> {
+        self.wal.sync()
+    }
+
     pub(crate) fn write(
         &mut self,
         k: Vec<u8>,
@@ -185,7 +189,7 @@ impl Iterator for MemtableIterator {
 
 #[cfg(test)]
 mod tests {
-    use crate::WALSync::Off;
+    use crate::WALSync::Manual;
 
     use super::*;
     use tempfile::tempdir;
@@ -208,7 +212,7 @@ mod tests {
     fn test_size_estimation_basic_inserts() {
         let temp_dir = tempdir().unwrap();
         let wal_path = temp_dir.path().join("test.wal");
-        let mut memtable = Memtable::new(wal_path, Off).unwrap();
+        let mut memtable = Memtable::new(wal_path, Manual).unwrap();
 
         // Initially should be empty
         assert_eq!(memtable.estimated_size_bytes(), 0);
@@ -227,7 +231,7 @@ mod tests {
     fn test_size_estimation_key_updates() {
         let temp_dir = tempdir().unwrap();
         let wal_path = temp_dir.path().join("test.wal");
-        let mut memtable = Memtable::new(wal_path, Off).unwrap();
+        let mut memtable = Memtable::new(wal_path, Manual).unwrap();
 
         write_kv(&mut memtable, b"key", 5);
         assert_eq!(memtable.estimated_size_bytes(), 8);
@@ -252,7 +256,7 @@ mod tests {
     fn test_size_estimation_mixed_operations() {
         let temp_dir = tempdir().unwrap();
         let wal_path = temp_dir.path().join("test.wal");
-        let mut memtable = Memtable::new(wal_path, Off).unwrap();
+        let mut memtable = Memtable::new(wal_path, Manual).unwrap();
 
         // Insert some key-value pairs
         write_kv(&mut memtable, b"key1", 6);
@@ -286,7 +290,7 @@ mod tests {
 
         // First, create a memtable and write some data
         {
-            let mut memtable1 = Memtable::new(wal_path.clone(), Off).unwrap();
+            let mut memtable1 = Memtable::new(wal_path.clone(), Manual).unwrap();
             write_kv(&mut memtable1, b"key1", 6);
             write_kv(&mut memtable1, b"key2", 6);
             write_kv(&mut memtable1, b"key1", 14);
@@ -296,7 +300,7 @@ mod tests {
             let expected_size = memtable1.estimated_size_bytes();
 
             // Now create a new memtable that will replay the WAL
-            let memtable2 = Memtable::new(wal_path.clone(), Off).unwrap();
+            let memtable2 = Memtable::new(wal_path.clone(), Manual).unwrap();
             assert_eq!(memtable2.estimated_size_bytes(), expected_size);
 
             // Verify the values are also correct

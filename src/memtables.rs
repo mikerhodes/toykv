@@ -182,6 +182,14 @@ impl Memtables {
         }
         iters
     }
+
+    pub(crate) fn sync_wal(&mut self) -> Result<(), ToyKVError> {
+        self.active_memtable.wal_sync()?;
+        for t in self.frozen_memtables.iter_mut() {
+            t.wal_sync()?;
+        }
+        Ok(())
+    }
 }
 
 fn new_wal_path(dir: &Path) -> PathBuf {
@@ -211,7 +219,7 @@ mod tests {
 
         let mut mts = Memtables::new(
             d.path().to_path_buf(),
-            crate::WALSync::Off,
+            crate::WALSync::Manual,
             2_500_000, // high enough not to be reached
             1024,      // tiny 1KB target sstables size
         )?;
@@ -235,6 +243,32 @@ mod tests {
         write_kv(&mut mts, b"key2", 513);
         assert!(mts.active_memtable_full());
         assert!(mts.frozen_memtables_full());
+
+        Ok(())
+    }
+    #[test]
+    fn test_wal_sync() -> Result<(), ToyKVError> {
+        let d = tempfile::tempdir().expect("Failed to create temp dir");
+
+        let mut mts = Memtables::new(
+            d.path().to_path_buf(),
+            crate::WALSync::Manual,
+            2_500_000, // high enough not to be reached
+            1024,      // tiny 1KB target sstables size
+        )?;
+
+        // Write some keys and ensure each memtable in use
+        write_kv(&mut mts, b"key1", 513);
+        write_kv(&mut mts, b"key2", 513);
+        write_kv(&mut mts, b"key1", 513);
+        write_kv(&mut mts, b"key2", 513);
+        assert!(mts.active_memtable_full());
+        assert!(mts.frozen_memtables_full());
+
+        // Test only ensures that call succeeds, not that data
+        // is on disk. Assume calls are simple enough that we'd
+        // be checking the OS behaviour.
+        mts.sync_wal()?;
 
         Ok(())
     }

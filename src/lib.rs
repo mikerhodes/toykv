@@ -25,7 +25,7 @@ mod walindex;
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum WALSync {
     Full,
-    Off,
+    Manual,
 }
 
 #[derive(Default)]
@@ -288,6 +288,7 @@ impl ToyKV {
         self.metrics.reads.fetch_add(1, Ordering::Relaxed);
         Ok(r)
     }
+
     /// Perform a graceful shutdown.
     pub fn shutdown(&mut self) {}
 
@@ -318,6 +319,12 @@ impl ToyKV {
         m.add_iterator(sst_iter);
 
         Ok(KVIterator { i: m })
+    }
+
+    /// Sync WAL files for all memtables to disk; use when WALSync is Manual.
+    pub fn wal_sync(&mut self) -> Result<(), ToyKVError> {
+        let mut state = self.state.write().unwrap();
+        state.memtables.sync_wal()
     }
 }
 
