@@ -89,11 +89,13 @@ impl TableIterator {
         key: &[u8],
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<TableIterator, Error> {
-        let seeked_block_idx = TableIterator::seek_to_key_int(&tr.bm, key)?;
+        let bound_key = Bound::Included(key);
+        let seeked_block_idx =
+            TableIterator::seek_to_block_by_key(&tr.bm, bound_key)?;
         // position tableiterator at selected block
         let bi = BlockIterator::create_and_seek_to_key(
             tr.load_block(&tr.bm[seeked_block_idx])?,
-            Bound::Included(&key[..]),
+            bound_key,
         );
         Ok(TableIterator {
             tr,
@@ -112,17 +114,21 @@ impl TableIterator {
         self.tr.might_contain_hashed_key(hash)
     }
 
-    fn seek_to_key_int(
+    /// Return the index of the first block that contains an entry
+    /// matching bound_key.
+    fn seek_to_block_by_key(
         idx: &Vec<BlockMeta>,
-        key: &[u8],
+        bound_key: Bound<&[u8]>,
     ) -> Result<usize, Error> {
-        // TODO Use Bound for key to seek to. I wonder if it's easier
-        // when using excluded start key to instead bump the key up
-        // to the next value by incrementing the last byte. No,
-        // because it's a slice and we'd edit the key!
-        // https://skyzh.github.io/mini-lsm/week1-04-sst.html#task-2-sst-iterator
+        let key = match bound_key {
+            // No bound is trivially first block
+            Bound::Unbounded => return Ok(0),
+            Bound::Included(k) => k,
+            Bound::Excluded(k) => k,
+        };
 
         assert!(key.len() > 0, "key length must be >0");
+        assert!(idx.len() < i64::MAX as usize, "too many blocks in reader");
 
         let mut left: i64 = 0;
         let mut right: i64 = idx.len() as i64 - 1;
@@ -135,7 +141,7 @@ impl TableIterator {
             if *key >= block_meta.first_key[..]
                 && *key <= block_meta.last_key[..]
             {
-                return Ok(mid as usize);
+                break;
             } else if *key < block_meta.first_key[..] {
                 right = mid - 1
             } else {
@@ -143,13 +149,21 @@ impl TableIterator {
             }
         }
 
-        // The key may fall between the last key of the block
-        // we found, and the first key of the next block. If
-        // so, skip this block.
-        if mid as usize + 1 < idx.len() {
-            if *key > idx[mid as usize].last_key[..] {
-                mid += 1;
-            }
+        // Handle cases where we should fall over to the next
+        // block because the last_key is outside the bound.
+        // Previously we only checked first_key.
+        let last_key = &idx[mid as usize].last_key[..];
+        mid = match bound_key {
+            Bound::Excluded(k) if k >= last_key => mid + 1,
+            Bound::Included(k) if k > last_key => mid + 1,
+            _ => mid,
+        };
+
+        // Perhaps we could return None if we've found the
+        // key is beyond the end of the last block. For now
+        // allow the last block to be (needlessly) processed.
+        if mid >= idx.len() as i64 {
+            mid = idx.len() as i64 - 1
         }
 
         Ok(mid as usize)
@@ -164,13 +178,16 @@ impl TableIterator {
             return self.rewind();
         }
 
-        let cut = TableIterator::seek_to_key_int(&self.tr.bm, key)?;
+        let cut = TableIterator::seek_to_block_by_key(
+            &self.tr.bm,
+            Bound::Included(key),
+        )?;
 
         // position tableiterator at selected block
         self.b_idx = cut;
         self.bi = BlockIterator::create_and_seek_to_key(
             self.tr.load_block(&self.tr.bm[cut])?,
-            Bound::Included(&key[..]),
+            Bound::Included(key),
         );
 
         Ok(())
@@ -194,6 +211,124 @@ impl TableIterator {
     /// Return the first/last keys in this iterator as tuple
     pub(crate) fn key_range(&self) -> (&Vec<u8>, &Vec<u8>) {
         self.tr.key_range()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::BlockMeta;
+
+    fn bm(first: &str, last: &str) -> BlockMeta {
+        BlockMeta {
+            start_offset: 0,
+            end_offset: 0,
+            first_key: first.as_bytes().to_vec(),
+            last_key: last.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn seek_unbounded_returns_first_block() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Unbounded);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn seek_included_key_within_block() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Included(b"f"));
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn seek_included_first_key_in_block() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Included(b"e"));
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn seek_included_last_key_in_block() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Included(b"g"));
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn seek_included_key_between_blocks() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Included(b"d"));
+        assert_eq!(result.unwrap(), 1);
+    }
+    #[test]
+    fn seek_included_sole_key_in_block() {
+        let idx = vec![bm("a", "a"), bm("c", "e"), bm("g", "i")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Included(b"a"));
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn seek_included_key_beyond_last_block() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Included(b"z"));
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn seek_excluded_first_key_in_block() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Excluded(b"e"));
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn seek_excluded_sole_key_in_block() {
+        let idx = vec![bm("a", "a"), bm("c", "e"), bm("g", "i")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Excluded(b"a"));
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn seek_excluded_last_key_in_block() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Excluded(b"g"));
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn seek_excluded_key_beyond_last_block() {
+        let idx = vec![bm("a", "c"), bm("e", "g"), bm("i", "k")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Excluded(b"z"));
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn seek_included_key_beyond_only_block() {
+        let idx = vec![bm("a", "c")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Included(b"z"));
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn seek_excluded_key_beyond_only_block() {
+        let idx = vec![bm("a", "c")];
+        let result =
+            TableIterator::seek_to_block_by_key(&idx, Bound::Excluded(b"z"));
+        assert_eq!(result.unwrap(), 0);
     }
 }
 
