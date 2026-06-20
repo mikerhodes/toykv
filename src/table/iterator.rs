@@ -121,59 +121,38 @@ impl TableIterator {
         // to the next value by incrementing the last byte. No,
         // because it's a slice and we'd edit the key!
         // https://skyzh.github.io/mini-lsm/week1-04-sst.html#task-2-sst-iterator
-        // In the doc it says to just use the start key. I think that means
-        // you have to check the start key of the following block rather
-        // than the end key of this block to see if the key falls in the
-        // gap. That solves the problem of the "falls between blocks" case.
-        // (and you can do a check on the end key of the block you settle
-        // on to figure whether you should skip to the next block).
-        // After finding the block, set an attr on the iterator for the
-        // seeked key, so that next() can skip until it gets there.
 
         assert!(key.len() > 0, "key length must be >0");
 
-        let mut left = 0;
-        let mut right = idx.len() - 1;
-        let mut cut = 0;
-        // dbg!(left, right, &key);
+        let mut left: i64 = 0;
+        let mut right: i64 = idx.len() as i64 - 1;
+        let mut mid: i64 = 0;
 
         while left <= right {
-            cut = (left + right) / 2;
+            mid = (left + right) / 2;
+            let block_meta = &idx[mid as usize];
 
-            // dbg!(left, right, cut);
-
-            // Happens when there is only one block. Other times?
-            if left == right {
-                cut = left;
-                break;
-            }
-
-            let bm = &idx[cut];
-            let bm_next = &idx[cut + 1];
-
-            // TODO key is after last in table? Do we have a test?
-            // Probably should get some edge case tests written.
-
-            if key < &bm.first_key[..] && cut == 0 {
-                // key is earlier than first key in table, break
-                break;
-            } else if key < &bm.first_key[..] {
-                // take the left half
-                right = cut - 1;
-            } else if key >= &bm.first_key[..] && key < &bm_next.first_key[..] {
-                // Check whether the key falls between this block and
-                // the next, if so, start at the next.
-                if key > &bm.last_key[..] {
-                    cut += 1;
-                }
-                break;
+            if *key >= block_meta.first_key[..]
+                && *key <= block_meta.last_key[..]
+            {
+                return Ok(mid as usize);
+            } else if *key < block_meta.first_key[..] {
+                right = mid - 1
             } else {
-                // take the right half
-                left = cut + 1;
+                left = mid + 1
             }
         }
 
-        Ok(cut)
+        // The key may fall between the last key of the block
+        // we found, and the first key of the next block. If
+        // so, skip this block.
+        if mid as usize + 1 < idx.len() {
+            if *key > idx[mid as usize].last_key[..] {
+                mid += 1;
+            }
+        }
+
+        Ok(mid as usize)
     }
 
     /// Seek to a key in the table. next() will resume from
