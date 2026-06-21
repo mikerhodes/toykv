@@ -135,7 +135,7 @@ impl TableIterator {
         let mut mid: i64 = 0;
 
         while left <= right {
-            mid = (left + right) / 2;
+            mid = left + ((right - left) / 2);
             let block_meta = &idx[mid as usize];
 
             if *key >= block_meta.first_key[..]
