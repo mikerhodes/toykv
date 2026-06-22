@@ -169,25 +169,24 @@ impl TableIterator {
         Ok(mid as usize)
     }
 
-    /// Seek to a key in the table. next() will resume from
-    /// the first entry with key, or the entry following where
-    /// key would be.
-    pub(crate) fn seek_to_key(&mut self, key: &[u8]) -> Result<(), Error> {
-        if key.len() == 0 {
-            // All keys are greater than a null key
-            return self.rewind();
+    /// Seek to a bound in the table. next() will resume from
+    /// the first entry matching bound.
+    pub(crate) fn seek_to_key(
+        &mut self,
+        bound: Bound<&[u8]>,
+    ) -> Result<(), Error> {
+        match bound {
+            Bound::Unbounded => return self.rewind(),
+            Bound::Included(k) | Bound::Excluded(k) if k.is_empty() => {
+                return self.rewind()
+            }
+            _ => {}
         }
 
-        let cut = TableIterator::seek_to_block_by_key(
-            &self.tr.bm,
-            Bound::Included(key),
-        )?;
-
-        // position tableiterator at selected block
-        self.b_idx = cut;
+        self.b_idx = TableIterator::seek_to_block_by_key(&self.tr.bm, bound)?;
         self.bi = BlockIterator::create_and_seek_to_key(
-            self.tr.load_block(&self.tr.bm[cut])?,
-            Bound::Included(key),
+            self.tr.load_block(&self.tr.bm[self.b_idx])?,
+            bound,
         );
 
         Ok(())
