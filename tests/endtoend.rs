@@ -195,7 +195,7 @@ fn operations_blocked_after_shutdown() -> Result<(), ToyKVError> {
     }
 
     let mut cnt = 0;
-    for _ in db.scan(None, Bound::Unbounded)? {
+    for _ in db.scan(Bound::Unbounded, Bound::Unbounded)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
@@ -234,25 +234,34 @@ fn scan() -> Result<(), ToyKVError> {
     }
 
     let mut cnt = 0;
-    for _ in db.scan(None, Bound::Unbounded)? {
+    for _ in db.scan(Bound::Unbounded, Bound::Unbounded)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
 
     let mut cnt = 0;
-    for _ in db.scan(Some(ordered_bytes(500).as_slice()), Bound::Unbounded)? {
+    for _ in db.scan(
+        Bound::Included(ordered_bytes(500).as_slice()),
+        Bound::Unbounded,
+    )? {
         cnt += 1;
     }
     assert_eq!(cnt, writes - 499); // 499 as 500 is in result set
 
     let mut cnt = 0;
-    for _ in db.scan(Some(ordered_bytes(2499).as_slice()), Bound::Unbounded)? {
+    for _ in db.scan(
+        Bound::Included(ordered_bytes(2499).as_slice()),
+        Bound::Unbounded,
+    )? {
         cnt += 1;
     }
     assert_eq!(cnt, 2); // 2 => 2499, 2500
 
     let mut cnt = 0;
-    for _ in db.scan(Some(ordered_bytes(-1400).as_slice()), Bound::Unbounded)? {
+    for _ in db.scan(
+        Bound::Included(ordered_bytes(-1400).as_slice()),
+        Bound::Unbounded,
+    )? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
@@ -286,31 +295,31 @@ fn scan_seek_key_check_next() -> Result<(), ToyKVError> {
 
     // check the first keys
     {
-        let mut it = db.scan(Some(&[0]), Bound::Unbounded)?;
+        let mut it = db.scan(Bound::Included(&[0]), Bound::Unbounded)?;
         assert_eq!(it.next().unwrap().unwrap().key, ordered_bytes(1));
     }
     {
         let sk = ordered_bytes(-1400);
-        let mut it = db.scan(Some(sk.as_slice()), Bound::Unbounded)?;
+        let mut it = db.scan(Bound::Included(sk.as_slice()), Bound::Unbounded)?;
         assert_eq!(it.next().unwrap().unwrap().key, ordered_bytes(1));
     }
     {
         let sk = ordered_bytes(1500);
-        let mut it = db.scan(Some(sk.as_slice()), Bound::Unbounded)?;
+        let mut it = db.scan(Bound::Included(sk.as_slice()), Bound::Unbounded)?;
         assert_eq!(it.next().unwrap().unwrap().key, ordered_bytes(1500));
     }
     {
         let sk = ordered_bytes(123);
-        let mut it = db.scan(Some(sk.as_slice()), Bound::Unbounded)?;
+        let mut it = db.scan(Bound::Included(sk.as_slice()), Bound::Unbounded)?;
         assert_eq!(it.next().unwrap().unwrap().key, ordered_bytes(123));
     }
     {
         let sk = ordered_bytes(writes * 2);
-        let mut it = db.scan(Some(sk.as_slice()), Bound::Unbounded)?;
+        let mut it = db.scan(Bound::Included(sk.as_slice()), Bound::Unbounded)?;
         assert!(it.next().is_none());
     }
     {
-        let mut it = db.scan(Some(&[255]), Bound::Unbounded)?;
+        let mut it = db.scan(Bound::Included(&[255]), Bound::Unbounded)?;
         assert!(it.next().is_none());
     }
 
@@ -342,13 +351,13 @@ fn scan_on_reopen() -> Result<(), ToyKVError> {
 
     let db2 = toykv::open(tmp_dir.path())?;
     let mut cnt = 0;
-    for _ in db2.scan(None, Bound::Unbounded)? {
+    for _ in db2.scan(Bound::Unbounded, Bound::Unbounded)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes);
     let mut cnt = 0;
     for _ in db2.scan(
-        Some((500 as i64).to_be_bytes().as_slice()),
+        Bound::Included((500 as i64).to_be_bytes().as_slice()),
         Bound::Unbounded,
     )? {
         cnt += 1;
@@ -385,7 +394,7 @@ fn scan_with_upper_bound() -> Result<(), ToyKVError> {
         let i2v = |x: i64| (x as i64).to_be_bytes().to_vec();
         let check = |sk: i64, ub: Bound<Vec<u8>>, expected: usize| {
             assert_eq!(
-                db.scan(Some(sk.to_be_bytes().as_slice()), ub)
+                db.scan(Bound::Included(sk.to_be_bytes().as_slice()), ub)
                     .unwrap()
                     .count(),
                 expected
@@ -394,7 +403,7 @@ fn scan_with_upper_bound() -> Result<(), ToyKVError> {
 
         // First, fully unbounded scan
         let mut cnt = 0;
-        for _ in db.scan(None, Bound::Unbounded)? {
+        for _ in db.scan(Bound::Unbounded, Bound::Unbounded)? {
             cnt += 1;
         }
         assert_eq!(cnt, writes);
@@ -435,7 +444,7 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
     }
 
     let mut cnt = 0;
-    for _ in db.scan(None, Bound::Unbounded)? {
+    for _ in db.scan(Bound::Unbounded, Bound::Unbounded)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes / 2);
@@ -444,7 +453,7 @@ fn scan_with_deletes() -> Result<(), ToyKVError> {
 
     let db2 = toykv::open(tmp_dir.path())?;
     cnt = 0;
-    for _ in db2.scan(None, Bound::Unbounded)? {
+    for _ in db2.scan(Bound::Unbounded, Bound::Unbounded)? {
         cnt += 1;
     }
     assert_eq!(cnt, writes / 2);
@@ -668,7 +677,7 @@ fn scan_empty_database() -> Result<(), ToyKVError> {
     let db = toykv::open(tmp_dir.path())?;
 
     let mut count = 0;
-    for _ in db.scan(None, Bound::Unbounded)? {
+    for _ in db.scan(Bound::Unbounded, Bound::Unbounded)? {
         count += 1;
     }
     assert_eq!(count, 0);
@@ -698,7 +707,7 @@ fn scan_database_with_only_deleted_items() -> Result<(), ToyKVError> {
     }
 
     let mut count = 0;
-    for _ in db.scan(None, Bound::Unbounded)? {
+    for _ in db.scan(Bound::Unbounded, Bound::Unbounded)? {
         count += 1;
     }
     assert_eq!(count, 0);
@@ -727,7 +736,7 @@ fn scan_returns_correct_values() -> Result<(), ToyKVError> {
     }
 
     let mut items: Vec<_> = db
-        .scan(None, Bound::Unbounded)?
+        .scan(Bound::Unbounded, Bound::Unbounded)?
         .collect::<Result<Vec<_>, _>>()?;
     items.sort_by(|a, b| a.key.cmp(&b.key));
 
@@ -765,7 +774,7 @@ fn key_ordering_edge_cases() -> Result<(), ToyKVError> {
 
     // Scan should return in lexicographic order
     let scanned: Vec<_> = db
-        .scan(None, Bound::Unbounded)?
+        .scan(Bound::Unbounded, Bound::Unbounded)?
         .collect::<Result<Vec<_>, _>>()?;
 
     for (i, expected_key) in keys.iter().enumerate() {

@@ -1,4 +1,4 @@
-use std::{fs, io, sync::atomic::Ordering};
+use std::{fs, io, ops::Bound, sync::atomic::Ordering};
 
 use toykv::{error::ToyKVError, ToyKV, ToyKVBuilder, WALSync};
 
@@ -101,7 +101,7 @@ fn compact_lifecycle_test() -> Result<(), ToyKVError> {
             // Now scan
             {
                 assert_eq!(db.live_sstables(), 1);
-                let it = db.scan(None, std::ops::Bound::Unbounded)?;
+                let it = db.scan(Bound::Unbounded, Bound::Unbounded)?;
                 let mut i: i64 = 1;
                 for n in it {
                     let n = n.unwrap();
@@ -177,7 +177,7 @@ fn compact_lifecycle_test() -> Result<(), ToyKVError> {
             // Just test the scan
             {
                 assert_eq!(db.live_sstables(), 1);
-                let it = db.scan(None, std::ops::Bound::Unbounded)?;
+                let it = db.scan(Bound::Unbounded, Bound::Unbounded)?;
                 let mut i: i64 = 1;
                 for n in it {
                     let n = n.unwrap();

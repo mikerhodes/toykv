@@ -190,7 +190,7 @@ mod tests {
 
             // Test scanning across all files
             let mut scan_count = 0;
-            let it = db.scan(None, Bound::Unbounded)?;
+            let it = db.scan(Bound::Unbounded, Bound::Unbounded)?;
             for entry in it {
                 let entry = entry?;
                 scan_count += 1;
@@ -282,7 +282,7 @@ mod tests {
             assert_eq!(new_idx.levels.l1.len(), 74, "l1 should have 74 file");
 
             // Verify complete data integrity through scanning
-            let it = db.scan(None, Bound::Unbounded)?;
+            let it = db.scan(Bound::Unbounded, Bound::Unbounded)?;
             let mut scanned_keys = Vec::new();
 
             for entry in it {
@@ -385,7 +385,7 @@ mod tests {
             }
 
             let count = db
-                .scan(None, Bound::Unbounded)?
+                .scan(Bound::Unbounded, Bound::Unbounded)?
                 .filter(|e| e.is_ok())
                 .count();
             assert_eq!(count, writes, "Should have all keys");
@@ -486,7 +486,7 @@ mod tests {
 
             // Check scan also only returns half
             let count = sstables
-                .iters(None, Bound::Unbounded)?
+                .iters(Bound::Unbounded, Bound::Unbounded)?
                 .filter(|e| e.is_ok())
                 .count();
             assert_eq!(count, writes / 2, "Should have half of the keys");
@@ -536,7 +536,7 @@ mod tests {
                 "Make sure we have written a table to disk"
             );
 
-            let it = db.scan(None, Bound::Unbounded)?;
+            let it = db.scan(Bound::Unbounded, Bound::Unbounded)?;
             let mut scanned_keys = Vec::new();
             for entry in it {
                 scanned_keys.push(entry?.key);
@@ -553,7 +553,8 @@ mod tests {
 
             // Test range queries that span file boundaries
             let mid_key = format!("key_{:08}", 500).into_bytes();
-            let it = db.scan(Some(&mid_key), Bound::Unbounded)?;
+            let it =
+                db.scan(Bound::Included(mid_key.as_slice()), Bound::Unbounded)?;
             let mut range_keys = Vec::new();
 
             for entry in it {

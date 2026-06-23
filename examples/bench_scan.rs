@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{ops::Bound, time::Instant};
 
 use toykv::{error::ToyKVError, ToyKVBuilder};
 
@@ -42,8 +42,8 @@ fn main() -> Result<(), ToyKVError> {
         let sk = (n).to_be_bytes();
         let ek = (n + 100).to_be_bytes();
         let got = db.scan(
-            Some(sk.as_slice()),
-            std::ops::Bound::Excluded(ek.to_vec()),
+            Bound::Included(sk.as_slice()),
+            Bound::Excluded(ek.to_vec()),
         )?;
         let mut c = 0;
         for _ in got {

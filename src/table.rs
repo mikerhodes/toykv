@@ -204,10 +204,10 @@ impl SSTables {
 
     pub(crate) fn iters(
         &self,
-        k: Option<&[u8]>,
+        lower_bound: Bound<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<MergeIterator, ToyKVError> {
-        self.sstables.iter(k, upper_bound)
+        self.sstables.iter(lower_bound, upper_bound)
     }
 
     /// Number of in-use sstables
@@ -321,7 +321,6 @@ impl SSTablesReader {
         )?;
         match ci.next() {
             Some(Ok(v)) if v.key == k => {
-                // dbg!(tables_searched);
                 return Ok(Some(v.value));
             }
             Some(Err(x)) => return Err(x),
@@ -336,13 +335,9 @@ impl SSTablesReader {
     /// on disk.
     fn iter(
         &self,
-        k: Option<&[u8]>,
+        lower_bound: Bound<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<MergeIterator, ToyKVError> {
-        let lower_bound = match k {
-            Some(k) => Bound::Included(k),
-            None => Bound::Unbounded,
-        };
         let mut mi = MergeIterator::new();
 
         // Add each L0 sstable individually as each is
@@ -1008,7 +1003,9 @@ mod tests {
             SipHasher13::new(),
         )
         .unwrap();
-        table_iterator.seek_to_key(Bound::Included(b"c_cherry")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"c_cherry"))
+            .unwrap();
 
         // After seeking, next() should return "c_cherry" first
         let first_record = table_iterator.next().unwrap().unwrap();
@@ -1060,7 +1057,9 @@ mod tests {
             SipHasher13::new(),
         )
         .unwrap();
-        table_iterator.seek_to_key(Bound::Included(b"b_banana")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"b_banana"))
+            .unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
         assert_eq!(first_record.key, b"c_cherry");
@@ -1070,7 +1069,9 @@ mod tests {
         );
 
         // Test seeking to "d_date" which doesn't exist - should start from "e_elderberry"
-        table_iterator.seek_to_key(Bound::Included(b"d_date")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"d_date"))
+            .unwrap();
         let next_record = table_iterator.next().unwrap().unwrap();
         assert_eq!(next_record.key, b"e_elderberry");
         assert_eq!(next_record.value, KVValue::Some(b"purple fruit".to_vec()));
@@ -1101,7 +1102,9 @@ mod tests {
             SipHasher13::new(),
         )
         .unwrap();
-        table_iterator.seek_to_key(Bound::Included(b"a_apple")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"a_apple"))
+            .unwrap();
 
         // Should start from the first key
         let first_record = table_iterator.next().unwrap().unwrap();
@@ -1134,7 +1137,9 @@ mod tests {
             SipHasher13::new(),
         )
         .unwrap();
-        table_iterator.seek_to_key(Bound::Included(b"z_zucchini")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"z_zucchini"))
+            .unwrap();
 
         // Should have no more records
         assert!(table_iterator.next().is_none());
@@ -1165,7 +1170,9 @@ mod tests {
             SipHasher13::new(),
         )
         .unwrap();
-        table_iterator.seek_to_key(Bound::Included(b"a_apple")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"a_apple"))
+            .unwrap();
 
         // Should return all records starting from the first
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
@@ -1201,7 +1208,9 @@ mod tests {
             SipHasher13::new(),
         )
         .unwrap();
-        table_iterator.seek_to_key(Bound::Included(b"c_cherry")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"c_cherry"))
+            .unwrap();
 
         // Should return only the last record
         let records: Result<Vec<KVRecord>, _> = table_iterator.collect();
@@ -1241,7 +1250,9 @@ mod tests {
             SipHasher13::new(),
         )
         .unwrap();
-        table_iterator.seek_to_key(Bound::Included(b"b_banana")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"b_banana"))
+            .unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
         assert_eq!(first_record.key, b"b_banana");
@@ -1288,22 +1299,30 @@ mod tests {
         .unwrap();
 
         // First seek to "c_cherry"
-        table_iterator.seek_to_key(Bound::Included(b"c_cherry")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"c_cherry"))
+            .unwrap();
         let record = table_iterator.next().unwrap().unwrap();
         assert_eq!(record.key, b"c_cherry");
 
         // Second seek to "b_banana" (backward seek)
-        table_iterator.seek_to_key(Bound::Included(b"b_banana")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"b_banana"))
+            .unwrap();
         let record = table_iterator.next().unwrap().unwrap();
         assert_eq!(record.key, b"b_banana");
 
         // Third seek to "e_elderberry" (forward seek)
-        table_iterator.seek_to_key(Bound::Included(b"e_elderberry")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"e_elderberry"))
+            .unwrap();
         let record = table_iterator.next().unwrap().unwrap();
         assert_eq!(record.key, b"e_elderberry");
 
         // Fourth seek to end of table
-        table_iterator.seek_to_key(Bound::Included(b"z_zebra")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"z_zebra"))
+            .unwrap();
         assert!(table_iterator.next().is_none());
     }
 
@@ -1332,7 +1351,9 @@ mod tests {
         .unwrap();
 
         // Seek to a key in the middle
-        table_iterator.seek_to_key(Bound::Included(b"key000500")).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"key000500"))
+            .unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
         assert_eq!(first_record.key, b"key000500");
@@ -1368,7 +1389,9 @@ mod tests {
             SipHasher13::new(),
         )
         .unwrap();
-        table_iterator.seek_to_key(Bound::Included(b"" as &[u8])).unwrap();
+        table_iterator
+            .seek_to_key(Bound::Included(b"" as &[u8]))
+            .unwrap();
 
         let first_record = table_iterator.next().unwrap().unwrap();
         assert_eq!(first_record.key, b"a_apple");

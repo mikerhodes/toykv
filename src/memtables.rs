@@ -1,6 +1,7 @@
 use std::{
     iter::repeat_with,
     mem,
+    ops::Bound,
     path::{Path, PathBuf},
 };
 
@@ -171,8 +172,8 @@ impl Memtables {
 
     pub(crate) fn iters(
         &self,
-        lower_bound: std::ops::Bound<Vec<u8>>,
-        upper_bound: std::ops::Bound<Vec<u8>>,
+        lower_bound: Bound<Vec<u8>>,
+        upper_bound: Bound<Vec<u8>>,
     ) -> Vec<memtable::MemtableIterator> {
         let mut iters = vec![self
             .active_memtable

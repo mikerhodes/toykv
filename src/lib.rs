@@ -299,17 +299,15 @@ impl ToyKV {
     // iterator cannot outlive the toykv instance.
     pub fn scan<'a>(
         &'a self,
-        start_key: Option<&'a [u8]>,
+        lower_bound: Bound<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<KVIterator, ToyKVError> {
-        let lower_bound = match start_key {
-            None => Bound::Unbounded,
-            Some(k) => Bound::Included(k.to_vec()),
-        };
-
         let state = self.state.read().unwrap();
-        let mt_iters = state.memtables.iters(lower_bound, upper_bound.clone());
-        let sst_iter = state.sstables.iters(start_key, upper_bound.clone())?;
+        let mt_iters = state
+            .memtables
+            .iters(lower_bound.map(|s| s.to_vec()), upper_bound.clone());
+        let sst_iter =
+            state.sstables.iters(lower_bound, upper_bound.clone())?;
         drop(state);
 
         let mut m = MergeIterator::new();

@@ -1,8 +1,8 @@
 use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::SkipMap;
+use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::ops::Bound;
 
 use ouroboros::self_referencing;
 
@@ -290,7 +290,8 @@ mod tests {
 
         // First, create a memtable and write some data
         {
-            let mut memtable1 = Memtable::new(wal_path.clone(), Manual).unwrap();
+            let mut memtable1 =
+                Memtable::new(wal_path.clone(), Manual).unwrap();
             write_kv(&mut memtable1, b"key1", 6);
             write_kv(&mut memtable1, b"key2", 6);
             write_kv(&mut memtable1, b"key1", 14);
