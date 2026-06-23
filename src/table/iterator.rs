@@ -48,23 +48,22 @@ impl TableIterator {
     /// Bound::Excluded is not supported and will panic.
     pub(crate) fn new_bounded_with_tablereader(
         tr: Arc<TableReader>,
-        lower_bound: Bound<Vec<u8>>,
+        lower_bound: Bound<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<TableIterator, Error> {
-        match lower_bound {
-            Bound::Unbounded => {
-                TableIterator::new_with_tablereader(tr, upper_bound)
-            }
-            Bound::Included(key) => TableIterator::new_seeked_with_tablereader(
-                tr,
-                &key,
-                upper_bound,
-            ),
-            Bound::Excluded(_) => {
-                // TODO use a ToyKVError instead.
-                panic!("TableIterator doesn't support Bound::Excluded")
-            }
-        }
+        let seeked_block_idx =
+            TableIterator::seek_to_block_by_key(&tr.bm, lower_bound)?;
+        // position tableiterator at selected block
+        let bi = BlockIterator::create_and_seek_to_key(
+            tr.load_block(&tr.bm[seeked_block_idx])?,
+            lower_bound,
+        );
+        Ok(TableIterator {
+            tr,
+            bi,
+            b_idx: seeked_block_idx,
+            upper_bound,
+        })
     }
 
     /// Create a TableReader that's seeked to start (Bound::Unbounded) and
@@ -82,29 +81,6 @@ impl TableIterator {
         })
     }
 
-    /// Create a TableReader that's seeked to k (Bound::Included) and
-    /// will stop at upper_bound.
-    fn new_seeked_with_tablereader(
-        tr: Arc<TableReader>,
-        key: &[u8],
-        upper_bound: Bound<Vec<u8>>,
-    ) -> Result<TableIterator, Error> {
-        let bound_key = Bound::Included(key);
-        let seeked_block_idx =
-            TableIterator::seek_to_block_by_key(&tr.bm, bound_key)?;
-        // position tableiterator at selected block
-        let bi = BlockIterator::create_and_seek_to_key(
-            tr.load_block(&tr.bm[seeked_block_idx])?,
-            bound_key,
-        );
-        Ok(TableIterator {
-            tr,
-            bi,
-            b_idx: seeked_block_idx,
-            upper_bound,
-        })
-    }
-
     /// Get the path to the underlying file for this TableIterator.
     pub(crate) fn table_path(&self) -> PathBuf {
         self.tr.p.clone()
@@ -118,9 +94,9 @@ impl TableIterator {
     /// matching bound_key.
     fn seek_to_block_by_key(
         idx: &Vec<BlockMeta>,
-        bound_key: Bound<&[u8]>,
+        lower_bound: Bound<&[u8]>,
     ) -> Result<usize, Error> {
-        let key = match bound_key {
+        let key = match lower_bound {
             // No bound is trivially first block
             Bound::Unbounded => return Ok(0),
             Bound::Included(k) => k,
@@ -153,7 +129,7 @@ impl TableIterator {
         // block because the last_key is outside the bound.
         // Previously we only checked first_key.
         let last_key = &idx[mid as usize].last_key[..];
-        mid = match bound_key {
+        mid = match lower_bound {
             Bound::Excluded(k) if k >= last_key => mid + 1,
             Bound::Included(k) if k > last_key => mid + 1,
             _ => mid,

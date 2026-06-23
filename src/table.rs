@@ -300,7 +300,7 @@ impl SSTablesReader {
             // tables_searched += 1;
             let mut t = TableIterator::new_bounded_with_tablereader(
                 tr.clone(),
-                Bound::Included(k.to_vec()),
+                Bound::Included(k),
                 Bound::Unbounded,
             )?;
             match t.next() {
@@ -316,7 +316,7 @@ impl SSTablesReader {
         // Next check L1
         let mut ci = ConcatIterator::new(
             self.l1_tablereaders.clone(),
-            Bound::Included(k.to_vec()),
+            Bound::Included(k),
             Bound::Included(k.to_vec()),
         )?;
         match ci.next() {
@@ -340,7 +340,7 @@ impl SSTablesReader {
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<MergeIterator, ToyKVError> {
         let lower_bound = match k {
-            Some(k) => Bound::Included(k.to_vec()),
+            Some(k) => Bound::Included(k),
             None => Bound::Unbounded,
         };
         let mut mi = MergeIterator::new();
@@ -350,7 +350,7 @@ impl SSTablesReader {
         for tr in &self.l0_tablereaders {
             let t = TableIterator::new_bounded_with_tablereader(
                 tr.clone(),
-                lower_bound.clone(),
+                lower_bound,
                 upper_bound.clone(),
             )?;
             mi.add_iterator(t);

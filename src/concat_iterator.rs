@@ -14,7 +14,6 @@ pub(crate) struct ConcatIterator {
     readers: Vec<Arc<TableReader>>,
     current_reader_idx: usize,
     current_table_iterator: Option<TableIterator>,
-    lower_bound: Bound<Vec<u8>>,
     upper_bound: Bound<Vec<u8>>,
 }
 
@@ -22,7 +21,7 @@ impl ConcatIterator {
     /// Create a bounded iterator that will scan the sorted run in readers.
     pub(crate) fn new(
         readers: Vec<Arc<TableReader>>,
-        lower_bound: Bound<Vec<u8>>,
+        lower_bound: Bound<&[u8]>,
         upper_bound: Bound<Vec<u8>>,
     ) -> Result<Self, ToyKVError> {
         // TODO if I alter find_starting_table_idx to instead be removing
@@ -31,11 +30,11 @@ impl ConcatIterator {
         // More efficient if we reverse the readers, and pop from the end.
         let (start_table_idx, current_table_iterator) = if readers.len() > 0 {
             let start_table_idx =
-                ConcatIterator::find_starting_table_idx(&readers, &lower_bound);
+                ConcatIterator::find_starting_table_idx(&readers, lower_bound);
             let current_table_iterator =
                 Some(TableIterator::new_bounded_with_tablereader(
                     readers[start_table_idx].clone(),
-                    lower_bound.clone(),
+                    lower_bound,
                     upper_bound.clone(),
                 )?);
             (start_table_idx, current_table_iterator)
@@ -47,7 +46,6 @@ impl ConcatIterator {
             readers,
             current_reader_idx: start_table_idx,
             current_table_iterator,
-            lower_bound,
             upper_bound,
         })
     }
@@ -61,12 +59,12 @@ impl ConcatIterator {
     /// results during iteration.
     fn find_starting_table_idx(
         readers: &Vec<Arc<TableReader>>,
-        b: &Bound<Vec<u8>>,
+        b: Bound<&[u8]>,
     ) -> usize {
         // b => Unbounded, return 0.
         // b => Included(k), search for k <= last_key, or last block.
         // b => Excluded(k), search for k < last_key, or last block.
-        if *b == Bound::Unbounded {
+        if b == Bound::Unbounded {
             0
         } else {
             let mut idx: usize = 0;
@@ -157,9 +155,13 @@ impl Iterator for ConcatIterator {
                 Bound::Excluded(x) if fk >= x => false,
                 _ => true,
             } {
+                // safety: we can use Unbounded as the lower bound because
+                // we are iterating over a sorted run, so when we move
+                // forward by a table, the new first key in that table
+                // must already be above the original lower_bound.
                 let next_iterator = TableIterator::new_bounded_with_tablereader(
                     tr,
-                    self.lower_bound.clone(),
+                    Bound::Unbounded,
                     self.upper_bound.clone(),
                 );
                 match next_iterator {
@@ -218,10 +220,8 @@ mod tests {
         let table3 = create_test_table(vec![b"elderberry", b"fig"]);
         let readers = vec![table1, table2, table3];
 
-        let result = ConcatIterator::find_starting_table_idx(
-            &readers,
-            &Bound::Unbounded,
-        );
+        let result =
+            ConcatIterator::find_starting_table_idx(&readers, Bound::Unbounded);
         assert_eq!(result, 0);
     }
 
@@ -235,13 +235,13 @@ mod tests {
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"apple".to_vec()),
+            Bound::Included(b"apple".as_ref()),
         );
         assert_eq!(result, 0);
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"banana".to_vec()),
+            Bound::Included(b"banana".as_ref()),
         );
         assert_eq!(result, 0);
     }
@@ -256,13 +256,13 @@ mod tests {
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"cherry".to_vec()),
+            Bound::Included(b"cherry".as_ref()),
         );
         assert_eq!(result, 1);
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"date".to_vec()),
+            Bound::Included(b"date".as_ref()),
         );
         assert_eq!(result, 1);
     }
@@ -277,13 +277,13 @@ mod tests {
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"elderberry".to_vec()),
+            Bound::Included(b"elderberry".as_ref()),
         );
         assert_eq!(result, 2);
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"fig".to_vec()),
+            Bound::Included(b"fig".as_ref()),
         );
         assert_eq!(result, 2);
     }
@@ -298,7 +298,7 @@ mod tests {
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"zebra".to_vec()),
+            Bound::Included(b"zebra".as_ref()),
         );
         assert_eq!(result, 2); // Should return last table index (2)
     }
@@ -313,7 +313,7 @@ mod tests {
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"apple".to_vec()),
+            Bound::Included(b"apple".as_ref()),
         );
         assert_eq!(result, 0);
     }
@@ -329,7 +329,7 @@ mod tests {
         // For excluded, we need key < last_key, so "apple" (excluded) should still find table 0
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Excluded(b"apple".to_vec()),
+            Bound::Excluded(b"apple".as_ref()),
         );
         assert_eq!(result, 0);
     }
@@ -346,14 +346,14 @@ mod tests {
         // Since "banana" is the last key of table1, it should move to table2
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Excluded(b"banana".to_vec()),
+            Bound::Excluded(b"banana".as_ref()),
         );
         assert_eq!(result, 1);
 
         // Excluded "date" should move to table3
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Excluded(b"date".to_vec()),
+            Bound::Excluded(b"date".as_ref()),
         );
         assert_eq!(result, 2);
     }
@@ -368,7 +368,7 @@ mod tests {
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Excluded(b"zebra".to_vec()),
+            Bound::Excluded(b"zebra".as_ref()),
         );
         assert_eq!(result, 2); // Should return last table index
     }
@@ -379,27 +379,25 @@ mod tests {
         let table1 = create_test_table(vec![b"apple", b"banana"]);
         let readers = vec![table1];
 
+        let result =
+            ConcatIterator::find_starting_table_idx(&readers, Bound::Unbounded);
+        assert_eq!(result, 0);
+
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Unbounded,
+            Bound::Included(b"apple".as_ref()),
         );
         assert_eq!(result, 0);
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"apple".to_vec()),
+            Bound::Included(b"zebra".as_ref()),
         );
         assert_eq!(result, 0);
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"zebra".to_vec()),
-        );
-        assert_eq!(result, 0);
-
-        let result = ConcatIterator::find_starting_table_idx(
-            &readers,
-            &Bound::Excluded(b"banana".to_vec()),
+            Bound::Excluded(b"banana".as_ref()),
         );
         assert_eq!(result, 0);
     }
@@ -414,19 +412,19 @@ mod tests {
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"\x00".to_vec()),
+            Bound::Included(b"\x00".as_ref()),
         );
         assert_eq!(result, 0);
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"\x7f".to_vec()),
+            Bound::Included(b"\x7f".as_ref()),
         );
         assert_eq!(result, 1);
 
         let result = ConcatIterator::find_starting_table_idx(
             &readers,
-            &Bound::Included(b"\xff".to_vec()),
+            Bound::Included(b"\xff".as_ref()),
         );
         assert_eq!(result, 2);
     }
@@ -449,42 +447,42 @@ mod tests {
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"banana".to_vec()),
+            Bound::Included(b"banana".as_ref()),
             Bound::Unbounded,
         )?;
         assert_eq!(result.count(), 5);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"banana".to_vec()),
+            Bound::Included(b"banana".as_ref()),
             Bound::Included(b"banana".to_vec()),
         )?;
         assert_eq!(result.count(), 1);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"banana".to_vec()),
+            Bound::Included(b"banana".as_ref()),
             Bound::Excluded(b"banana".to_vec()),
         )?;
         assert_eq!(result.count(), 0);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"apple".to_vec()),
+            Bound::Included(b"apple".as_ref()),
             Bound::Excluded(b"fig".to_vec()),
         )?;
         assert_eq!(result.count(), 5);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"000000".to_vec()),
+            Bound::Included(b"000000".as_ref()),
             Bound::Excluded(b"zzzzzz".to_vec()),
         )?;
         assert_eq!(result.count(), 6);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"zzzzzz".to_vec()),
+            Bound::Included(b"zzzzzz".as_ref()),
             Bound::Unbounded,
         )?;
         assert_eq!(result.count(), 0);
@@ -513,42 +511,42 @@ mod tests {
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"banana".to_vec()),
+            Bound::Included(b"banana".as_ref()),
             Bound::Unbounded,
         )?;
         assert_eq!(result.count(), 5);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"banana".to_vec()),
+            Bound::Included(b"banana".as_ref()),
             Bound::Included(b"banana".to_vec()),
         )?;
         assert_eq!(result.count(), 1);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"banana".to_vec()),
+            Bound::Included(b"banana".as_ref()),
             Bound::Excluded(b"banana".to_vec()),
         )?;
         assert_eq!(result.count(), 0);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"apple".to_vec()),
+            Bound::Included(b"apple".as_ref()),
             Bound::Excluded(b"fig".to_vec()),
         )?;
         assert_eq!(result.count(), 5);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"000000".to_vec()),
+            Bound::Included(b"000000".as_ref()),
             Bound::Excluded(b"zzzzzz".to_vec()),
         )?;
         assert_eq!(result.count(), 6);
 
         let result = ConcatIterator::new(
             readers.clone(),
-            Bound::Included(b"zzzzzz".to_vec()),
+            Bound::Included(b"zzzzzz".as_ref()),
             Bound::Unbounded,
         )?;
         assert_eq!(result.count(), 0);
