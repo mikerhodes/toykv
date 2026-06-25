@@ -389,38 +389,35 @@ impl BlockMeta {
         buf
     }
 
-    pub(crate) fn decode(data: &[u8]) -> BlockMeta {
-        let mut u32buf: [u8; 4] = [0u8; 4];
-        let mut u16buf: [u8; 2] = [0u8; 2];
-
+    pub(crate) fn decode(data: &[u8]) -> Result<BlockMeta, Error> {
         let mut c = Cursor::new(data);
-
-        assert!(matches!(c.read(&mut u32buf), Ok(4)));
-        let start_offset = u32::from_be_bytes(u32buf);
-        assert!(matches!(c.read(&mut u32buf), Ok(4)));
-        let end_offset = u32::from_be_bytes(u32buf);
-
-        assert!(matches!(c.read(&mut u16buf), Ok(2)));
-        let fkeylen = u16::from_be_bytes(u16buf);
-        let mut first_key = vec![0; fkeylen as usize];
-        assert!(
-            matches!(c.read(&mut first_key), Ok(n) if n == fkeylen as usize)
-        );
-
-        assert!(matches!(c.read(&mut u16buf), Ok(2)));
-        let lkeylen = u16::from_be_bytes(u16buf);
-        let mut last_key = vec![0; lkeylen as usize];
-        assert!(
-            matches!(c.read(&mut last_key), Ok(n) if n == lkeylen as usize)
-        );
-
-        BlockMeta {
+        let start_offset = read_u32(&mut c)?;
+        let end_offset = read_u32(&mut c)?;
+        let first_key = read_bytes(&mut c)?;
+        let last_key = read_bytes(&mut c)?;
+        Ok(BlockMeta {
             start_offset,
             end_offset,
             first_key,
             last_key,
-        }
+        })
     }
+}
+
+/// Read a u32 from a Cursor
+fn read_u32(c: &mut Cursor<&[u8]>) -> Result<u32, Error> {
+    let mut b: [u8; 4] = [0u8; 4];
+    c.read_exact(&mut b)?;
+    Ok(u32::from_be_bytes(b))
+}
+/// Read a sized byte string from a Cursor
+fn read_bytes(c: &mut Cursor<&[u8]>) -> Result<Vec<u8>, Error> {
+    let mut b: [u8; 2] = [0u8; 2];
+    c.read_exact(&mut b)?;
+    let len = u16::from_be_bytes(b);
+    let mut result = vec![0; len as usize];
+    c.read_exact(&mut result)?;
+    Ok(result)
 }
 
 /// Utility Trait to gather the paths for TableIterators

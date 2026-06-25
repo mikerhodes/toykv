@@ -120,7 +120,7 @@ impl TableReader {
             // read blockmeta into buf and decode into result vec
             let mut bm_buf = vec![0u8; bm_len as usize];
             f.read_exact(&mut bm_buf)?;
-            result.push(BlockMeta::decode(&bm_buf));
+            result.push(BlockMeta::decode(&bm_buf)?);
 
             // Did we read the last blockmeta?
             let p = f.stream_position()?;
