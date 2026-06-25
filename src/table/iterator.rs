@@ -66,21 +66,6 @@ impl TableIterator {
         })
     }
 
-    /// Create a TableReader that's seeked to start (Bound::Unbounded) and
-    /// will stop at upper_bound.
-    fn new_with_tablereader(
-        tr: Arc<TableReader>,
-        upper_bound: Bound<Vec<u8>>,
-    ) -> Result<TableIterator, Error> {
-        let first_block = tr.load_block(&tr.bm[0])?;
-        Ok(TableIterator {
-            tr,
-            bi: BlockIterator::create(first_block),
-            b_idx: 0,
-            upper_bound,
-        })
-    }
-
     /// Get the path to the underlying file for this TableIterator.
     pub(crate) fn table_path(&self) -> PathBuf {
         self.tr.p.clone()
